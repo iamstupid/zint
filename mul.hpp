@@ -88,7 +88,7 @@ inline void mpn_mul_basecase(limb_t* rp, const limb_t* ap, uint32_t an,
     }
 
 #if defined(_MSC_VER) && defined(_M_X64) && defined(ZINT_USE_ADX_ASM)
-    if (an >= 3 && cpu_has_bmi2_adx_cached()) {
+    if (an >= 20 && cpu_has_bmi2_adx_cached()) {
         mpn_mul_basecase_adx(rp, ap, an, bp, bn);
         return;
     }
