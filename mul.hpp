@@ -32,11 +32,46 @@ static constexpr uint32_t SQR_NTT_THRESHOLD = 1024;
 // Basecase multiplication (schoolbook)
 // ============================================================
 
+// Comba multiplication for balanced small n: rp[0..2n) = ap[0..n) * bp[0..n)
+// Uses a 192-bit accumulator (acc0/acc1/acc2).
+inline void mpn_mul_basecase_comba_n(limb_t* rp, const limb_t* ap, const limb_t* bp, uint32_t n) {
+    assert(n > 0);
+
+    limb_t acc0 = 0;
+    limb_t acc1 = 0;
+    limb_t acc2 = 0;
+
+    for (uint32_t k = 0; k < 2 * n; ++k) {
+        uint32_t i0 = (k >= (n - 1)) ? (k - (n - 1)) : 0;
+        uint32_t i1 = (k < (n - 1)) ? k : (n - 1);
+
+        for (uint32_t i = i0; i <= i1; ++i) {
+            uint32_t j = k - i;
+            limb_t hi;
+            limb_t lo = umul_hilo(ap[i], bp[j], &hi);
+
+            unsigned char c = _addcarry_u64(0, acc0, lo, (unsigned long long*)&acc0);
+            c = _addcarry_u64(c, acc1, hi, (unsigned long long*)&acc1);
+            acc2 += (limb_t)c;
+        }
+
+        rp[k] = acc0;
+        acc0 = acc1;
+        acc1 = acc2;
+        acc2 = 0;
+    }
+}
+
 // rp[0..an+bn) = ap[0..an) * bp[0..bn)
 // Precondition: an >= bn > 0; rp does NOT alias ap or bp
 inline void mpn_mul_basecase(limb_t* rp, const limb_t* ap, uint32_t an,
                               const limb_t* bp, uint32_t bn)
 {
+    if (an == bn && bn >= 2 && bn <= 16) {
+        mpn_mul_basecase_comba_n(rp, ap, bp, bn);
+        return;
+    }
+
     // First row: rp = ap * bp[0]
     rp[an] = mpn_mul_1(rp, ap, an, bp[0]);
 
@@ -50,9 +85,56 @@ inline void mpn_mul_basecase(limb_t* rp, const limb_t* ap, uint32_t an,
 // Basecase squaring (exploits symmetry)
 // ============================================================
 
+// Comba squaring for small n: rp[0..2n) = ap[0..n)^2
+// Uses symmetry and a 192-bit accumulator (acc0/acc1/acc2).
+inline void mpn_sqr_basecase_comba_n(limb_t* rp, const limb_t* ap, uint32_t n) {
+    assert(n > 0);
+
+    limb_t acc0 = 0;
+    limb_t acc1 = 0;
+    limb_t acc2 = 0;
+
+    for (uint32_t k = 0; k < 2 * n; ++k) {
+        uint32_t i0 = (k >= (n - 1)) ? (k - (n - 1)) : 0;
+        uint32_t i1 = (k < (n - 1)) ? k : (n - 1);
+
+        for (uint32_t i = i0; i <= i1; ++i) {
+            uint32_t j = k - i;
+            if (i > j) break;
+
+            limb_t hi;
+            limb_t lo = umul_hilo(ap[i], ap[j], &hi);
+
+            if (i < j) {
+                limb_t extra = hi >> 63;
+                limb_t lo2 = lo << 1;
+                limb_t hi2 = (hi << 1) | (lo >> 63);
+
+                unsigned char c = _addcarry_u64(0, acc0, lo2, (unsigned long long*)&acc0);
+                c = _addcarry_u64(c, acc1, hi2, (unsigned long long*)&acc1);
+                acc2 += (limb_t)c;
+                acc2 += extra;
+            } else {
+                unsigned char c = _addcarry_u64(0, acc0, lo, (unsigned long long*)&acc0);
+                c = _addcarry_u64(c, acc1, hi, (unsigned long long*)&acc1);
+                acc2 += (limb_t)c;
+            }
+        }
+
+        rp[k] = acc0;
+        acc0 = acc1;
+        acc1 = acc2;
+        acc2 = 0;
+    }
+}
+
 // rp[0..2*n) = ap[0..n)^2
 // Uses the identity: a^2 = sum_i(a[i]^2 * B^(2i)) + 2*sum_{i<j}(a[i]*a[j]*B^(i+j))
 inline void mpn_sqr_basecase(limb_t* rp, const limb_t* ap, uint32_t n) {
+    if (n >= 2 && n <= 16) {
+        mpn_sqr_basecase_comba_n(rp, ap, n);
+        return;
+    }
     if (n == 1) {
         rp[0] = umul_hilo(ap[0], ap[0], &rp[1]);
         return;
