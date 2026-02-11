@@ -53,8 +53,8 @@ if (!(Test-Path $report)) {
 @(
     "# Improvement report: $Version"
     ""
-    "- zint commit: `$zintHead`"
-    "- parent commit: `$parentHead`"
+    "- zint commit: ``$zintHead``"
+    "- parent commit: ``$parentHead``"
     ""
     "## Summary"
     ""
