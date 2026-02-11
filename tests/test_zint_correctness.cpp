@@ -284,12 +284,51 @@ static void test_bitwise_algebra_and_mod2k() {
     }
 }
 
+static void test_mpn_addlsh_n() {
+    zint::xoshiro256pp rng(6);
+    u32 sizes[] = {1, 2, 3, 4, 5, 8, 16, 32};
+    unsigned shifts[] = {1, 7, 13, 31, 63};
+
+    for (u32 n : sizes) {
+        for (unsigned sh : shifts) {
+            for (int t = 0; t < 200; ++t) {
+                std::vector<zint::limb_t> a(n), b(n), r(n + 1);
+                for (u32 i = 0; i < n; ++i) {
+                    a[i] = (zint::limb_t)rng.next_u64();
+                    b[i] = (zint::limb_t)rng.next_u64();
+                }
+                a[n - 1] |= (1ULL << 63);
+                b[n - 1] |= (1ULL << 63);
+
+                zint::bigint A = zint::bigint::from_limbs(a.data(), n, false);
+                zint::bigint B = zint::bigint::from_limbs(b.data(), n, false);
+                zint::bigint ref = A + (B << sh);
+
+                zint::limb_t carry = zint::mpn_addlsh_n(r.data(), a.data(), b.data(), n, sh);
+                r[n] = carry;
+                zint::bigint got = zint::bigint::from_limbs(r.data(), n + 1, false);
+                ZINT_ASSERT(got == ref);
+
+                // Aliasing: rp == ap should be supported.
+                std::vector<zint::limb_t> a2 = a;
+                std::vector<zint::limb_t> r2(n + 1);
+                zint::limb_t carry2 = zint::mpn_addlsh_n(a2.data(), a2.data(), b.data(), n, sh);
+                std::memcpy(r2.data(), a2.data(), (size_t)n * sizeof(zint::limb_t));
+                r2[n] = carry2;
+                zint::bigint got2 = zint::bigint::from_limbs(r2.data(), n + 1, false);
+                ZINT_ASSERT(got2 == ref);
+            }
+        }
+    }
+}
+
 int main() {
     test_small_int64();
     test_modular_arithmetic();
     test_decimal_roundtrip_and_cache();
     test_non_decimal_roundtrip();
     test_bitwise_algebra_and_mod2k();
+    test_mpn_addlsh_n();
     std::printf("OK\n");
     return 0;
 }

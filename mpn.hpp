@@ -197,6 +197,22 @@ inline limb_t mpn_add(limb_t* rp, const limb_t* ap, uint32_t an, const limb_t* b
     return carry;
 }
 
+// rp[0..n) = ap[0..n) + (bp[0..n) << cnt), return carry limb (0..2^cnt)
+// Precondition: n > 0, 0 < cnt < 64. rp may alias ap; rp must not alias bp.
+inline limb_t mpn_addlsh_n(limb_t* rp, const limb_t* ap, const limb_t* bp, uint32_t n, unsigned cnt) {
+    assert(n > 0 && cnt > 0 && cnt < LIMB_BITS);
+    unsigned rcnt = LIMB_BITS - cnt;
+    limb_t sh_carry = 0;
+    unsigned char carry = 0;
+    for (uint32_t i = 0; i < n; ++i) {
+        limb_t b = bp[i];
+        limb_t shifted = (b << cnt) | sh_carry;
+        sh_carry = b >> rcnt;
+        carry = _addcarry_u64(carry, ap[i], shifted, (unsigned long long*)&rp[i]);
+    }
+    return sh_carry + (limb_t)carry;
+}
+
 // ============================================================
 // Subtraction
 // ============================================================
