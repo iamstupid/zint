@@ -77,8 +77,8 @@ ZINT_NOINLINE inline void mpn_mul_basecase_adx(limb_t* rp, const limb_t* ap, uin
 }
 #endif
 
-ZINT_FORCEINLINE inline void mpn_mul_basecase_classic(limb_t* rp, const limb_t* ap, uint32_t an,
-                                                      const limb_t* bp, uint32_t bn)
+ZINT_NOINLINE inline void mpn_mul_basecase_classic(limb_t* rp, const limb_t* ap, uint32_t an,
+                                                   const limb_t* bp, uint32_t bn)
 {
     // First row: rp = ap * bp[0]
     rp[an] = mpn_mul_1(rp, ap, an, bp[0]);
