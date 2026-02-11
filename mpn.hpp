@@ -364,6 +364,45 @@ inline limb_t mpn_addmul_1(limb_t* rp, const limb_t* ap, uint32_t n, limb_t b) {
     return carry;
 }
 
+// ============================================================
+// ADX/BMI2 accelerated addmul_1 (optional, runtime-gated)
+// ============================================================
+
+#if defined(_MSC_VER) && defined(_M_X64) && defined(ZINT_USE_ADX_ASM)
+extern "C" std::uint64_t zint_mpn_addmul_1_adx(std::uint64_t* rp, const std::uint64_t* ap, std::uint32_t n, std::uint64_t b);
+#endif
+
+inline bool cpu_has_bmi2_adx() {
+#if defined(_MSC_VER) && defined(_M_X64)
+    int info[4] = {0, 0, 0, 0};
+    __cpuidex(info, 7, 0);
+    const bool bmi2 = (info[1] & (1 << 8)) != 0;
+    const bool adx  = (info[1] & (1 << 19)) != 0;
+    return bmi2 && adx;
+#else
+    return false;
+#endif
+}
+
+inline bool cpu_has_bmi2_adx_cached() {
+#if defined(_MSC_VER) && defined(_M_X64)
+    static const bool has = cpu_has_bmi2_adx();
+    return has;
+#else
+    return false;
+#endif
+}
+
+// Safe wrapper: uses ADX kernel when available, otherwise falls back to scalar mpn_addmul_1.
+inline limb_t mpn_addmul_1_fast(limb_t* rp, const limb_t* ap, uint32_t n, limb_t b) {
+#if defined(_MSC_VER) && defined(_M_X64) && defined(ZINT_USE_ADX_ASM)
+    if (cpu_has_bmi2_adx_cached()) {
+        return (limb_t)zint_mpn_addmul_1_adx((std::uint64_t*)rp, (const std::uint64_t*)ap, n, (std::uint64_t)b);
+    }
+#endif
+    return mpn_addmul_1(rp, ap, n, b);
+}
+
 // rp[0..n) -= ap[0..n) * b, return borrow limb
 inline limb_t mpn_submul_1(limb_t* rp, const limb_t* ap, uint32_t n, limb_t b) {
     limb_t carry = 0;

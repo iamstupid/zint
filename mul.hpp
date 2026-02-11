@@ -72,6 +72,20 @@ inline void mpn_mul_basecase(limb_t* rp, const limb_t* ap, uint32_t an,
         return;
     }
 
+#if defined(_MSC_VER) && defined(_M_X64) && defined(ZINT_USE_ADX_ASM)
+    if (cpu_has_bmi2_adx_cached()) {
+        // First row: rp = ap * bp[0]
+        rp[an] = mpn_mul_1(rp, ap, an, bp[0]);
+
+        // Remaining rows: rp += ap * bp[j], shifted by j (ADX-accelerated addmul_1)
+        for (uint32_t j = 1; j < bn; j++) {
+            rp[j + an] = (limb_t)zint_mpn_addmul_1_adx(
+                (std::uint64_t*)(rp + j), (const std::uint64_t*)ap, an, (std::uint64_t)bp[j]);
+        }
+        return;
+    }
+#endif
+
     // First row: rp = ap * bp[0]
     rp[an] = mpn_mul_1(rp, ap, an, bp[0]);
 
@@ -142,6 +156,14 @@ inline void mpn_sqr_basecase(limb_t* rp, const limb_t* ap, uint32_t n) {
     rp[0] = 0; // will be filled by diagonal
 
     // Add remaining off-diagonal products
+#if defined(_MSC_VER) && defined(_M_X64) && defined(ZINT_USE_ADX_ASM)
+    if (cpu_has_bmi2_adx_cached()) {
+        for (uint32_t i = 1; i < n - 1; i++) {
+            rp[i + n] = (limb_t)zint_mpn_addmul_1_adx(
+                (std::uint64_t*)(rp + 2 * i + 1), (const std::uint64_t*)(ap + i + 1), n - i - 1, (std::uint64_t)ap[i]);
+        }
+    } else
+#endif
     for (uint32_t i = 1; i < n - 1; i++) {
         rp[i + n] = mpn_addmul_1(rp + 2 * i + 1, ap + i + 1, n - i - 1, ap[i]);
     }
