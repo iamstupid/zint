@@ -396,7 +396,7 @@ inline bool cpu_has_bmi2_adx_cached() {
 // Safe wrapper: uses ADX kernel when available, otherwise falls back to scalar mpn_addmul_1.
 inline limb_t mpn_addmul_1_fast(limb_t* rp, const limb_t* ap, uint32_t n, limb_t b) {
 #if defined(_MSC_VER) && defined(_M_X64) && defined(ZINT_USE_ADX_ASM)
-    if (cpu_has_bmi2_adx_cached()) {
+    if (n >= 3 && cpu_has_bmi2_adx_cached()) {
         return (limb_t)zint_mpn_addmul_1_adx((std::uint64_t*)rp, (const std::uint64_t*)ap, n, (std::uint64_t)b);
     }
 #endif

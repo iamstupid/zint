@@ -62,6 +62,21 @@ ZINT_NOINLINE inline void mpn_mul_basecase_comba_n(limb_t* rp, const limb_t* ap,
     }
 }
 
+#if defined(_MSC_VER) && defined(_M_X64) && defined(ZINT_USE_ADX_ASM)
+ZINT_NOINLINE inline void mpn_mul_basecase_adx(limb_t* rp, const limb_t* ap, uint32_t an,
+                                               const limb_t* bp, uint32_t bn)
+{
+    // First row: rp = ap * bp[0]
+    rp[an] = mpn_mul_1(rp, ap, an, bp[0]);
+
+    // Remaining rows: rp += ap * bp[j], shifted by j (ADX-accelerated addmul_1)
+    for (uint32_t j = 1; j < bn; j++) {
+        rp[j + an] = (limb_t)zint_mpn_addmul_1_adx(
+            (std::uint64_t*)(rp + j), (const std::uint64_t*)ap, an, (std::uint64_t)bp[j]);
+    }
+}
+#endif
+
 // rp[0..an+bn) = ap[0..an) * bp[0..bn)
 // Precondition: an >= bn > 0; rp does NOT alias ap or bp
 inline void mpn_mul_basecase(limb_t* rp, const limb_t* ap, uint32_t an,
@@ -74,14 +89,7 @@ inline void mpn_mul_basecase(limb_t* rp, const limb_t* ap, uint32_t an,
 
 #if defined(_MSC_VER) && defined(_M_X64) && defined(ZINT_USE_ADX_ASM)
     if (an >= 3 && cpu_has_bmi2_adx_cached()) {
-        // First row: rp = ap * bp[0]
-        rp[an] = mpn_mul_1(rp, ap, an, bp[0]);
-
-        // Remaining rows: rp += ap * bp[j], shifted by j (ADX-accelerated addmul_1)
-        for (uint32_t j = 1; j < bn; j++) {
-            rp[j + an] = (limb_t)zint_mpn_addmul_1_adx(
-                (std::uint64_t*)(rp + j), (const std::uint64_t*)ap, an, (std::uint64_t)bp[j]);
-        }
+        mpn_mul_basecase_adx(rp, ap, an, bp, bn);
         return;
     }
 #endif
@@ -158,7 +166,7 @@ inline void mpn_sqr_basecase(limb_t* rp, const limb_t* ap, uint32_t n) {
     // Add remaining off-diagonal products
     if (n > 2) {
 #if defined(_MSC_VER) && defined(_M_X64) && defined(ZINT_USE_ADX_ASM)
-        if (cpu_has_bmi2_adx_cached()) {
+        if (n >= 4 && cpu_has_bmi2_adx_cached()) {
             for (uint32_t i = 1; i < n - 1; i++) {
                 rp[i + n] = (limb_t)zint_mpn_addmul_1_adx(
                     (std::uint64_t*)(rp + 2 * i + 1), (const std::uint64_t*)(ap + i + 1), n - i - 1, (std::uint64_t)ap[i]);
