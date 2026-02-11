@@ -34,7 +34,7 @@ static constexpr uint32_t SQR_NTT_THRESHOLD = 1024;
 
 // Comba multiplication for balanced small n: rp[0..2n) = ap[0..n) * bp[0..n)
 // Uses a 192-bit accumulator (acc0/acc1/acc2).
-inline void mpn_mul_basecase_comba_n(limb_t* rp, const limb_t* ap, const limb_t* bp, uint32_t n) {
+ZINT_NOINLINE inline void mpn_mul_basecase_comba_n(limb_t* rp, const limb_t* ap, const limb_t* bp, uint32_t n) {
     assert(n > 0);
 
     limb_t acc0 = 0;
@@ -67,7 +67,7 @@ inline void mpn_mul_basecase_comba_n(limb_t* rp, const limb_t* ap, const limb_t*
 inline void mpn_mul_basecase(limb_t* rp, const limb_t* ap, uint32_t an,
                               const limb_t* bp, uint32_t bn)
 {
-    if (an == bn && bn >= 2 && bn <= 16) {
+    if (an == bn && bn >= 6 && bn <= 16) {
         mpn_mul_basecase_comba_n(rp, ap, bp, bn);
         return;
     }
@@ -87,7 +87,7 @@ inline void mpn_mul_basecase(limb_t* rp, const limb_t* ap, uint32_t an,
 
 // Comba squaring for small n: rp[0..2n) = ap[0..n)^2
 // Uses symmetry and a 192-bit accumulator (acc0/acc1/acc2).
-inline void mpn_sqr_basecase_comba_n(limb_t* rp, const limb_t* ap, uint32_t n) {
+ZINT_NOINLINE inline void mpn_sqr_basecase_comba_n(limb_t* rp, const limb_t* ap, uint32_t n) {
     assert(n > 0);
 
     limb_t acc0 = 0;
@@ -131,10 +131,6 @@ inline void mpn_sqr_basecase_comba_n(limb_t* rp, const limb_t* ap, uint32_t n) {
 // rp[0..2*n) = ap[0..n)^2
 // Uses the identity: a^2 = sum_i(a[i]^2 * B^(2i)) + 2*sum_{i<j}(a[i]*a[j]*B^(i+j))
 inline void mpn_sqr_basecase(limb_t* rp, const limb_t* ap, uint32_t n) {
-    if (n >= 2 && n <= 16) {
-        mpn_sqr_basecase_comba_n(rp, ap, n);
-        return;
-    }
     if (n == 1) {
         rp[0] = umul_hilo(ap[0], ap[0], &rp[1]);
         return;

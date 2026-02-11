@@ -12,6 +12,21 @@
 
 #include <immintrin.h>
 
+// ============================================================
+// Force-inline / noinline macros
+// ============================================================
+
+#if defined(_MSC_VER)
+  #define ZINT_FORCEINLINE __forceinline
+  #define ZINT_NOINLINE __declspec(noinline)
+#elif defined(__GNUC__) || defined(__clang__)
+  #define ZINT_FORCEINLINE [[gnu::always_inline]] inline
+  #define ZINT_NOINLINE __attribute__((noinline))
+#else
+  #define ZINT_FORCEINLINE inline
+  #define ZINT_NOINLINE
+#endif
+
 #ifdef _MSC_VER
 #include <intrin.h>
 #pragma intrinsic(_addcarry_u64, _subborrow_u64, _umul128, _BitScanReverse64, _udiv128)
