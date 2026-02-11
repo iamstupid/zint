@@ -22,6 +22,12 @@ $divCsv = Join-Path $evalDir "bench_div.csv"
 $mulPng = Join-Path $evalDir "bench_mul.png"
 $divPng = Join-Path $evalDir "bench_div.png"
 
+$baseOut = Join-Path $evalDir "basecase.txt"
+$baseMulCsv = Join-Path $evalDir "basecase_mul.csv"
+$baseSqrCsv = Join-Path $evalDir "basecase_sqr.csv"
+$baseMulPng = Join-Path $evalDir "basecase_mul.png"
+$baseSqrPng = Join-Path $evalDir "basecase_sqr.png"
+
 $mpnAndCsv = Join-Path $evalDir "bitwise_mpn_and.csv"
 $mpnOrCsv  = Join-Path $evalDir "bitwise_mpn_or.csv"
 $mpnXorCsv = Join-Path $evalDir "bitwise_mpn_xor.csv"
@@ -69,6 +75,12 @@ python zint\scripts\plot_compare.py --csv $mpnOrCsv  --out $mpnOrPng  --title "m
 python zint\scripts\plot_compare.py --csv $mpnXorCsv --out $mpnXorPng --title "mpn_xor_n (u64 limbs)" | Out-File -Append -Encoding utf8 $bitwiseOut
 python zint\scripts\plot_compare.py --csv $mpnNotCsv --out $mpnNotPng --title "mpn_not_n (u64 limbs)" | Out-File -Append -Encoding utf8 $bitwiseOut
 python zint\scripts\plot_bigint_bitwise.py --csv $bigintCsv --out $bigintPng | Out-File -Append -Encoding utf8 $bitwiseOut
+
+# Build + run basecase benchmarks.
+cl /nologo /I. /std:c++17 /O2 /EHsc /arch:AVX2 zint\bench\bench_basecase.cpp /Fe:zint\bench\bench_basecase.exe | Out-File -Encoding utf8 $baseOut
+cmd /c "zint\\bench\\bench_basecase.exe --csv-mul zint\\evaluations\\$Version\\basecase_mul.csv --csv-sqr zint\\evaluations\\$Version\\basecase_sqr.csv" | Out-File -Append -Encoding utf8 $baseOut
+python zint\scripts\plot_compare.py --csv $baseMulCsv --out $baseMulPng --title "mpn_mul_basecase: n x n" | Out-File -Append -Encoding utf8 $baseOut
+python zint\scripts\plot_compare.py --csv $baseSqrCsv --out $baseSqrPng --title "mpn_sqr_basecase: n^2" | Out-File -Append -Encoding utf8 $baseOut
 
 # Create a report stub if missing.
 $report = Join-Path $evalDir "report.md"
