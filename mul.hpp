@@ -77,6 +77,30 @@ ZINT_NOINLINE inline void mpn_mul_basecase_adx(limb_t* rp, const limb_t* ap, uin
 }
 #endif
 
+ZINT_FORCEINLINE inline void mpn_mul_basecase_classic(limb_t* rp, const limb_t* ap, uint32_t an,
+                                                      const limb_t* bp, uint32_t bn)
+{
+    // First row: rp = ap * bp[0]
+    rp[an] = mpn_mul_1(rp, ap, an, bp[0]);
+
+    // Remaining rows: rp += ap * bp[j], shifted by j
+    for (uint32_t j = 1; j < bn; j++) {
+        rp[j + an] = mpn_addmul_1(rp + j, ap, an, bp[j]);
+    }
+}
+
+#if defined(_MSC_VER) && defined(_M_X64) && defined(ZINT_USE_ADX_ASM)
+ZINT_NOINLINE inline void mpn_mul_basecase_dispatch_large(limb_t* rp, const limb_t* ap, uint32_t an,
+                                                          const limb_t* bp, uint32_t bn)
+{
+    if (cpu_has_bmi2_adx_cached()) {
+        mpn_mul_basecase_adx(rp, ap, an, bp, bn);
+    } else {
+        mpn_mul_basecase_classic(rp, ap, an, bp, bn);
+    }
+}
+#endif
+
 // rp[0..an+bn) = ap[0..an) * bp[0..bn)
 // Precondition: an >= bn > 0; rp does NOT alias ap or bp
 inline void mpn_mul_basecase(limb_t* rp, const limb_t* ap, uint32_t an,
@@ -88,19 +112,13 @@ inline void mpn_mul_basecase(limb_t* rp, const limb_t* ap, uint32_t an,
     }
 
 #if defined(_MSC_VER) && defined(_M_X64) && defined(ZINT_USE_ADX_ASM)
-    if (an >= 20 && cpu_has_bmi2_adx_cached()) {
-        mpn_mul_basecase_adx(rp, ap, an, bp, bn);
+    if (an >= 20) {
+        mpn_mul_basecase_dispatch_large(rp, ap, an, bp, bn);
         return;
     }
 #endif
 
-    // First row: rp = ap * bp[0]
-    rp[an] = mpn_mul_1(rp, ap, an, bp[0]);
-
-    // Remaining rows: rp += ap * bp[j], shifted by j
-    for (uint32_t j = 1; j < bn; j++) {
-        rp[j + an] = mpn_addmul_1(rp + j, ap, an, bp[j]);
-    }
+    mpn_mul_basecase_classic(rp, ap, an, bp, bn);
 }
 
 // ============================================================
