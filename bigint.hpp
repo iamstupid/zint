@@ -663,6 +663,41 @@ private:
     }
 
     static bigint bitwise_binary_op(const bigint& a, const bigint& b, bitwise_op op) {
+        // Fast path: both operands non-negative => no sign extension needed.
+        if (!a.is_negative() && !b.is_negative()) {
+            uint32_t an = a.abs_size();
+            uint32_t bn = b.abs_size();
+
+            if (op == bitwise_op::and_) {
+                uint32_t rn = (an < bn) ? an : bn;
+                if (rn == 0) return bigint();
+                bigint r;
+                r.ensure_capacity(rn);
+                mpn_and_n(r.data_, a.data_, b.data_, rn);
+                r.set_size_sign(rn, false);
+                r.trim();
+                return r;
+            }
+
+            if (an == 0) return b;
+            if (bn == 0) return a;
+
+            uint32_t min_n = (an < bn) ? an : bn;
+            uint32_t rn = (an > bn) ? an : bn;
+            bigint r;
+            r.ensure_capacity(rn);
+
+            if (op == bitwise_op::or_) mpn_or_n(r.data_, a.data_, b.data_, min_n);
+            else mpn_xor_n(r.data_, a.data_, b.data_, min_n);
+
+            if (an > min_n) mpn_copyi(r.data_ + min_n, a.data_ + min_n, an - min_n);
+            else if (bn > min_n) mpn_copyi(r.data_ + min_n, b.data_ + min_n, bn - min_n);
+
+            r.set_size_sign(rn, false);
+            r.trim();
+            return r;
+        }
+
         uint32_t n = (std::max)(a.abs_size(), b.abs_size()) + 1;
         ScratchScope scope(scratch());
         limb_t* atc = scope.alloc<limb_t>(n, 32);

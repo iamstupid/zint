@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <vector>
 
 #include "bigint/mul.hpp"
@@ -22,6 +23,20 @@ static inline std::int64_t now_ns() {
     return duration_cast<nanoseconds>(high_resolution_clock::now().time_since_epoch()).count();
 }
 
+template<class Fn>
+static double bench_best_ns(int iters, Fn&& fn) {
+    // Warmup
+    fn();
+    std::int64_t best = (std::numeric_limits<std::int64_t>::max)();
+    for (int t = 0; t < 5; ++t) {
+        std::int64_t t0 = now_ns();
+        for (int i = 0; i < iters; ++i) fn();
+        std::int64_t t1 = now_ns();
+        best = (std::min)(best, t1 - t0);
+    }
+    return double(best) / iters;
+}
+
 static void fill_random_u64(std::uint64_t* buf, std::size_t n, zint::xoshiro256pp& rng) {
     for (std::size_t i = 0; i < n; ++i) buf[i] = rng.next_u64();
     if (n > 0) buf[n - 1] |= (1ULL << 63);
@@ -33,16 +48,11 @@ static double bench_mul_bi(std::uint32_t n, int iters) {
     fill_random_u64(a.data(), n, rng);
     fill_random_u64(b.data(), n, rng);
 
-    bi::mpn_mul((bi::limb_t*)r.data(), (const bi::limb_t*)a.data(), n,
-                (const bi::limb_t*)b.data(), n);
-
-    std::int64_t t0 = now_ns();
-    for (int i = 0; i < iters; ++i) {
+    auto fn = [&]() {
         bi::mpn_mul((bi::limb_t*)r.data(), (const bi::limb_t*)a.data(), n,
                     (const bi::limb_t*)b.data(), n);
-    }
-    std::int64_t t1 = now_ns();
-    return double(t1 - t0) / iters;
+    };
+    return bench_best_ns(iters, fn);
 }
 
 static double bench_mul_zint(std::uint32_t n, int iters) {
@@ -51,16 +61,11 @@ static double bench_mul_zint(std::uint32_t n, int iters) {
     fill_random_u64(a.data(), n, rng);
     fill_random_u64(b.data(), n, rng);
 
-    zint::mpn_mul((zint::limb_t*)r.data(), (const zint::limb_t*)a.data(), n,
-                  (const zint::limb_t*)b.data(), n);
-
-    std::int64_t t0 = now_ns();
-    for (int i = 0; i < iters; ++i) {
+    auto fn = [&]() {
         zint::mpn_mul((zint::limb_t*)r.data(), (const zint::limb_t*)a.data(), n,
                       (const zint::limb_t*)b.data(), n);
-    }
-    std::int64_t t1 = now_ns();
-    return double(t1 - t0) / iters;
+    };
+    return bench_best_ns(iters, fn);
 }
 
 static double bench_tdiv_bi(std::uint32_t n, int iters) {
@@ -72,18 +77,12 @@ static double bench_tdiv_bi(std::uint32_t n, int iters) {
 
     std::vector<std::uint64_t> q(n + 1), r(n);
 
-    bi::mpn_tdiv_qr((bi::limb_t*)q.data(), (bi::limb_t*)r.data(),
-                    (const bi::limb_t*)num.data(), 2 * n,
-                    (const bi::limb_t*)den.data(), n);
-
-    std::int64_t t0 = now_ns();
-    for (int i = 0; i < iters; ++i) {
+    auto fn = [&]() {
         bi::mpn_tdiv_qr((bi::limb_t*)q.data(), (bi::limb_t*)r.data(),
                         (const bi::limb_t*)num.data(), 2 * n,
                         (const bi::limb_t*)den.data(), n);
-    }
-    std::int64_t t1 = now_ns();
-    return double(t1 - t0) / iters;
+    };
+    return bench_best_ns(iters, fn);
 }
 
 static double bench_tdiv_zint(std::uint32_t n, int iters) {
@@ -95,18 +94,12 @@ static double bench_tdiv_zint(std::uint32_t n, int iters) {
 
     std::vector<std::uint64_t> q(n + 1), r(n);
 
-    zint::mpn_tdiv_qr((zint::limb_t*)q.data(), (zint::limb_t*)r.data(),
-                      (const zint::limb_t*)num.data(), 2 * n,
-                      (const zint::limb_t*)den.data(), n);
-
-    std::int64_t t0 = now_ns();
-    for (int i = 0; i < iters; ++i) {
+    auto fn = [&]() {
         zint::mpn_tdiv_qr((zint::limb_t*)q.data(), (zint::limb_t*)r.data(),
                           (const zint::limb_t*)num.data(), 2 * n,
                           (const zint::limb_t*)den.data(), n);
-    }
-    std::int64_t t1 = now_ns();
-    return double(t1 - t0) / iters;
+    };
+    return bench_best_ns(iters, fn);
 }
 
 struct Row {
@@ -147,11 +140,11 @@ int main(int argc, char** argv) {
         {128,   2000},
         {256,   1000},
         {512,    500},
-        {1024,   200},
-        {2048,   100},
-        {4096,    50},
-        {8192,    20},
-        {16384,   10},
+        {1024,   300},
+        {2048,   200},
+        {4096,   120},
+        {8192,    60},
+        {16384,   30},
     };
 
     std::vector<Row> rows_mul;
@@ -195,4 +188,3 @@ int main(int argc, char** argv) {
     write_csv(csv_div, rows_div);
     return 0;
 }
-
