@@ -455,14 +455,89 @@ public:
         set_size_sign(n, is_negative());
     }
 
+    // ---- Radix power cache (optional) ----
+    //
+    // Stores powers base^(2^k) lazily. Used by radix conversion routines
+    // (notably base-10 D&C conversion). By default, to_string/from_string will
+    // compute and free powers on-the-fly; users may inject a cache to reuse
+    // powers across repeated conversions.
+    //
+    // Not thread-safe if shared across threads.
+    struct radix_powers_cache {
+        struct entry {
+            limb_t* data = nullptr;
+            uint32_t size = 0;
+        };
+
+        limb_t base = 0;
+        std::vector<entry> pow2k{}; // pow2k[k] = base^(2^k)
+
+        radix_powers_cache() = default;
+        explicit radix_powers_cache(limb_t b) { reset(b); }
+
+        radix_powers_cache(const radix_powers_cache&) = delete;
+        radix_powers_cache& operator=(const radix_powers_cache&) = delete;
+
+        radix_powers_cache(radix_powers_cache&& o) noexcept
+            : base(o.base), pow2k(std::move(o.pow2k)) {
+            o.base = 0;
+            o.pow2k.clear();
+        }
+        radix_powers_cache& operator=(radix_powers_cache&& o) noexcept {
+            if (this != &o) {
+                clear();
+                base = o.base;
+                pow2k = std::move(o.pow2k);
+                o.base = 0;
+                o.pow2k.clear();
+            }
+            return *this;
+        }
+
+        ~radix_powers_cache() { clear(); }
+
+        void clear() noexcept {
+            for (auto& e : pow2k) {
+                mpn_free(e.data);
+                e.data = nullptr;
+                e.size = 0;
+            }
+            pow2k.clear();
+            base = 0;
+        }
+
+        void reset(limb_t b) {
+            if (base == b && !pow2k.empty()) return;
+            clear();
+            base = b;
+            if (base == 0) return;
+            limb_t* d = mpn_alloc(1);
+            d[0] = base;
+            pow2k.push_back({d, 1});
+        }
+
+        const entry& get_pow2k(uint32_t k) {
+            assert(base != 0);
+            while (k >= (uint32_t)pow2k.size()) {
+                const entry& prev = pow2k.back();
+                uint32_t rn = 2 * prev.size;
+                limb_t* rp = mpn_alloc(rn);
+                mpn_sqr(rp, prev.data, prev.size);
+                rn = mpn_normalize(rp, rn);
+                pow2k.push_back({rp, rn});
+            }
+            return pow2k[k];
+        }
+    };
+
     // ---- String conversion (O(n^2) basecase) ----
 
-    std::string to_string(int base = 10) const {
+    std::string to_string(int base = 10, radix_powers_cache* pow_cache = nullptr) const {
         if (is_zero()) return "0";
         assert(base >= 2 && base <= 36);
 
         // For base 10, use chunks of 10^18
-        if (base == 10) return to_decimal_string();
+        if (base == 10) return to_decimal_string(pow_cache);
 
         // Generic base conversion
         bigint tmp = this->abs();
@@ -480,7 +555,7 @@ public:
     }
 
     // Construct from decimal string
-    static bigint from_string(const char* s, int base = 10) {
+    static bigint from_string(const char* s, int base = 10, radix_powers_cache* pow_cache = nullptr) {
         assert(base >= 2 && base <= 36);
         if (!s || !*s) return bigint();
 
@@ -488,7 +563,7 @@ public:
         if (*s == '-') { neg = true; s++; }
         else if (*s == '+') { s++; }
 
-        if (base == 10) return from_decimal_string(s, neg);
+        if (base == 10) return from_decimal_string(s, neg, pow_cache);
 
         bigint result;
         for (; *s; s++) {
@@ -506,6 +581,17 @@ public:
         return result;
     }
 
+    // Construct from raw limbs (magnitude), little-endian.
+    static bigint from_limbs(const limb_t* p, uint32_t n, bool neg = false) {
+        bigint r;
+        n = mpn_normalize(p, n);
+        if (n == 0) return r;
+        r.ensure_capacity(n);
+        std::memcpy(r.data_, p, (size_t)n * sizeof(limb_t));
+        r.set_size_sign(n, neg);
+        return r;
+    }
+
     // Construct from string (convenience)
     explicit bigint(const char* s, int base = 10) : bigint(from_string(s, base)) {}
     explicit bigint(const std::string& s, int base = 10) : bigint(from_string(s.c_str(), base)) {}
@@ -521,31 +607,7 @@ private:
     static constexpr int    DIG10_18 = 18;
     static constexpr uint32_t RADIX_DC_THRESHOLD = 30; // limbs: D&C above this
 
-    // ---- Power-of-10 cache: 10^(2^k) for k = 0, 1, 2, ... ----
-    struct pow10_entry { limb_t* data; uint32_t size; };
-
-    static std::vector<pow10_entry>& pow10_table() {
-        static thread_local std::vector<pow10_entry> tab;
-        if (tab.empty()) {
-            limb_t* d = mpn_alloc(1);
-            d[0] = 10;
-            tab.push_back({d, 1});
-        }
-        return tab;
-    }
-
-    static const pow10_entry& get_pow10_2k(uint32_t k) {
-        auto& tab = pow10_table();
-        while (k >= (uint32_t)tab.size()) {
-            const auto& prev = tab.back();
-            uint32_t rn = 2 * prev.size;
-            limb_t* rp = mpn_alloc(rn);
-            mpn_sqr(rp, prev.data, prev.size);
-            rn = mpn_normalize(rp, rn);
-            tab.push_back({rp, rn});
-        }
-        return tab[k];
-    }
+    // Powers of 10 are provided via radix_powers_cache (on-the-fly by default).
 
     // Upper bound on decimal digits for a number with 'bits' bits
     static uint32_t est_decimal_digits(uint32_t bits) {
@@ -589,7 +651,8 @@ private:
 
     // ---- D&C to_decimal: O(M(n) log n) ----
     static void dc_to_decimal(std::string& out, bigint& x,
-                               uint32_t est_digits, uint32_t pad) {
+                               uint32_t est_digits, uint32_t pad,
+                               radix_powers_cache& pow_cache) {
         if (x.is_zero()) {
             if (pad > 0) out.append(pad, '0');
             return;
@@ -609,19 +672,19 @@ private:
         while ((1u << (k + 1)) <= half) k++;
         uint32_t split = 1u << k;
 
-        const auto& pow = get_pow10_2k(k);
+        const auto& pow = pow_cache.get_pow2k(k);
         bigint pow_bi = from_limbs_unsigned(pow.data, pow.size);
         bigint q, r;
         divmod(x, pow_bi, q, r);
 
         // High part (quotient)
         uint32_t high_pad = (pad > split) ? pad - split : 0;
-        dc_to_decimal(out, q, est_digits - split, high_pad);
+        dc_to_decimal(out, q, est_digits - split, high_pad, pow_cache);
         // Low part (remainder, zero-padded to split digits)
-        dc_to_decimal(out, r, split, split);
+        dc_to_decimal(out, r, split, split, pow_cache);
     }
 
-    std::string to_decimal_string() const {
+    std::string to_decimal_string(radix_powers_cache* pow_cache) const {
         uint32_t nn = abs_size();
         if (nn == 0) return "0";
 
@@ -630,7 +693,15 @@ private:
         if (is_negative()) result.push_back('-');
 
         uint32_t est = est_decimal_digits(bit_length());
-        dc_to_decimal(result, tmp, est, 0);
+        radix_powers_cache local;
+        if (!pow_cache) {
+            local.reset(10);
+            pow_cache = &local;
+        } else {
+            if (pow_cache->base == 0) pow_cache->reset(10);
+            else assert(pow_cache->base == 10);
+        }
+        dc_to_decimal(result, tmp, est, 0, *pow_cache);
         return result;
     }
 
@@ -666,7 +737,7 @@ private:
     }
 
     // ---- D&C from_decimal: O(M(n) log n) ----
-    static bigint dc_from_decimal(const char* s, uint32_t len) {
+    static bigint dc_from_decimal(const char* s, uint32_t len, radix_powers_cache& pow_cache) {
         if (len == 0) return bigint();
         if (len <= (uint32_t)DIG10_18 * RADIX_DC_THRESHOLD)
             return basecase_from_decimal(s, len);
@@ -677,24 +748,33 @@ private:
         while ((1u << (k + 1)) <= half) k++;
         uint32_t split = 1u << k;
 
-        bigint high = dc_from_decimal(s, len - split);
-        bigint low  = dc_from_decimal(s + (len - split), split);
+        bigint high = dc_from_decimal(s, len - split, pow_cache);
+        bigint low  = dc_from_decimal(s + (len - split), split, pow_cache);
 
-        const auto& pow = get_pow10_2k(k);
+        const auto& pow = pow_cache.get_pow2k(k);
         bigint pow_bi = from_limbs_unsigned(pow.data, pow.size);
         high *= pow_bi;
         high += low;
         return high;
     }
 
-    static bigint from_decimal_string(const char* s, bool neg) {
+    static bigint from_decimal_string(const char* s, bool neg, radix_powers_cache* pow_cache) {
         size_t len = std::strlen(s);
         if (len == 0) return bigint();
 
         // Skip leading zeros
         while (len > 1 && *s == '0') { s++; len--; }
 
-        bigint result = dc_from_decimal(s, (uint32_t)len);
+        radix_powers_cache local;
+        if (!pow_cache) {
+            local.reset(10);
+            pow_cache = &local;
+        } else {
+            if (pow_cache->base == 0) pow_cache->reset(10);
+            else assert(pow_cache->base == 10);
+        }
+
+        bigint result = dc_from_decimal(s, (uint32_t)len, *pow_cache);
         if (neg && !result.is_zero()) result.negate();
         return result;
     }

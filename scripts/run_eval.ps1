@@ -37,11 +37,11 @@ $parentHead = (git rev-parse HEAD)
 
 # Build + run tests (must not reference legacy bigint for correctness).
 Set-Location $parentRoot
-cl /nologo /std:c++17 /O2 /EHsc /arch:AVX2 zint\tests\test_zint_correctness.cpp /Fe:zint\tests\test_zint_correctness.exe | Out-File -Encoding utf8 $testsOut
+cl /nologo /I. /std:c++17 /O2 /EHsc /arch:AVX2 zint\tests\test_zint_correctness.cpp /Fe:zint\tests\test_zint_correctness.exe | Out-File -Encoding utf8 $testsOut
 cmd /c "zint\\tests\\test_zint_correctness.exe" | Out-File -Append -Encoding utf8 $testsOut
 
 # Build + run benchmark vs legacy bigint.
-cl /nologo /std:c++17 /O2 /EHsc /arch:AVX2 zint\bench\bench_zint_vs_bigint.cpp /Fe:zint\bench\bench_zint_vs_bigint.exe | Out-File -Encoding utf8 $benchOut
+cl /nologo /I. /std:c++17 /O2 /EHsc /arch:AVX2 zint\bench\bench_zint_vs_bigint.cpp /Fe:zint\bench\bench_zint_vs_bigint.exe | Out-File -Encoding utf8 $benchOut
 cmd /c "zint\\bench\\bench_zint_vs_bigint.exe --csv-mul zint\\evaluations\\$Version\\bench_mul.csv --csv-div zint\\evaluations\\$Version\\bench_div.csv" | Out-File -Append -Encoding utf8 $benchOut
 
 # Plot graphs.
@@ -64,4 +64,3 @@ if (!(Test-Path $report)) {
     ""
 ) | Out-File -Encoding utf8 $report
 }
-

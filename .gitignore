@@ -1,0 +1,13 @@
+*.exe
+*.obj
+*.pdb
+*.ilk
+*.idb
+*.exp
+*.lib
+*.dll
+*.so
+*.dylib
+*.a
+
+bench/*.csv
