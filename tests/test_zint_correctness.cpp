@@ -100,6 +100,16 @@ static void test_small_int64() {
         ZINT_ASSERT(q == zint::bigint(a0 / b0));
         ZINT_ASSERT(r == zint::bigint(a0 % b0));
 
+        // Bitwise ops should match builtins for int64_t (two's complement semantics).
+        zint::bigint aa = a & b;
+        zint::bigint oo = a | b;
+        zint::bigint xx = a ^ b;
+        zint::bigint na = ~a;
+        ZINT_ASSERT(aa == zint::bigint(a0 & b0));
+        ZINT_ASSERT(oo == zint::bigint(a0 | b0));
+        ZINT_ASSERT(xx == zint::bigint(a0 ^ b0));
+        ZINT_ASSERT(na == zint::bigint(~a0));
+
         // to_string/from_string for small values
         std::string sa = a.to_string(10);
         ZINT_ASSERT(sa == std::to_string(a0));
@@ -195,12 +205,91 @@ static void test_non_decimal_roundtrip() {
     }
 }
 
+static std::vector<zint::limb_t> mod_2k_tc(const zint::bigint& x, u32 kbits) {
+    u32 n = (kbits + 63) / 64;
+    std::vector<zint::limb_t> v(n, 0);
+    u32 m = x.abs_size();
+    u32 copy_n = (m < n) ? m : n;
+    for (u32 i = 0; i < copy_n; ++i) v[i] = x.limbs()[i];
+
+    if (x.is_negative()) {
+        for (u32 i = 0; i < n; ++i) v[i] = ~v[i];
+        if (n) (void)zint::mpn_add_1v(v.data(), v.data(), n, 1);
+    }
+
+    u32 tail = kbits & 63u;
+    if (tail && n) v[n - 1] &= ((1ULL << tail) - 1);
+    return v;
+}
+
+static void test_bitwise_algebra_and_mod2k() {
+    zint::xoshiro256pp rng(5);
+    constexpr u32 ks[] = {1, 7, 63, 64, 65, 127, 128, 129, 191, 192, 255, 256};
+
+    for (int t = 0; t < 1500; ++t) {
+        zint::bigint a = random_bigint(rng, 128);
+        zint::bigint b = random_bigint(rng, 128);
+        zint::bigint c = random_bigint(rng, 128);
+
+        ZINT_ASSERT((a & b) == (b & a));
+        ZINT_ASSERT((a | b) == (b | a));
+        ZINT_ASSERT((a ^ b) == (b ^ a));
+
+        ZINT_ASSERT((a & (b | c)) == ((a & b) | (a & c)));
+        ZINT_ASSERT((a | (b & c)) == ((a | b) & (a | c)));
+        ZINT_ASSERT(((a ^ b) ^ c) == (a ^ (b ^ c)));
+        ZINT_ASSERT(((a & b) & c) == (a & (b & c)));
+        ZINT_ASSERT(((a | b) | c) == (a | (b | c)));
+
+        ZINT_ASSERT((a & (~a)).is_zero());
+        ZINT_ASSERT((a | (~a)) == zint::bigint(-1));
+        ZINT_ASSERT((a ^ (~a)) == zint::bigint(-1));
+        ZINT_ASSERT((~a) == ((-a) - 1));
+
+        // x + y == (x ^ y) + 2*(x & y)
+        zint::bigint lhs = a + b;
+        zint::bigint rhs = (a ^ b) + ((a & b) << 1);
+        ZINT_ASSERT(lhs == rhs);
+
+        // Compare low bits via mod 2^k.
+        zint::bigint ab_and = a & b;
+        zint::bigint ab_or = a | b;
+        zint::bigint ab_xor = a ^ b;
+
+        for (u32 k : ks) {
+            auto am = mod_2k_tc(a, k);
+            auto bm = mod_2k_tc(b, k);
+            auto rm_and = mod_2k_tc(ab_and, k);
+            auto rm_or = mod_2k_tc(ab_or, k);
+            auto rm_xor = mod_2k_tc(ab_xor, k);
+
+            u32 n = (k + 63) / 64;
+            u32 tail = k & 63u;
+            zint::limb_t mask = tail ? ((1ULL << tail) - 1) : ~(zint::limb_t)0;
+
+            for (u32 i = 0; i < n; ++i) {
+                zint::limb_t exp_and = am[i] & bm[i];
+                zint::limb_t exp_or  = am[i] | bm[i];
+                zint::limb_t exp_xor = am[i] ^ bm[i];
+                if (i + 1 == n) {
+                    exp_and &= mask;
+                    exp_or  &= mask;
+                    exp_xor &= mask;
+                }
+                ZINT_ASSERT(rm_and[i] == exp_and);
+                ZINT_ASSERT(rm_or[i] == exp_or);
+                ZINT_ASSERT(rm_xor[i] == exp_xor);
+            }
+        }
+    }
+}
+
 int main() {
     test_small_int64();
     test_modular_arithmetic();
     test_decimal_roundtrip_and_cache();
     test_non_decimal_roundtrip();
+    test_bitwise_algebra_and_mod2k();
     std::printf("OK\n");
     return 0;
 }
-

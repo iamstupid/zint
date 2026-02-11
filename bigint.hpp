@@ -27,6 +27,8 @@ private:
     static constexpr uint32_t SIGN_BIT = 0x80000000u;
     static constexpr uint32_t SIZE_MASK = 0x7FFFFFFFu;
 
+    enum class bitwise_op { and_, or_, xor_ };
+
     // ---- Memory management ----
 
     void ensure_capacity(uint32_t n) {
@@ -402,6 +404,35 @@ public:
     bigint operator<<(unsigned cnt) const { bigint r(*this); r <<= cnt; return r; }
     bigint operator>>(unsigned cnt) const { bigint r(*this); r >>= cnt; return r; }
 
+    // ---- Bitwise operations (infinite two's complement semantics) ----
+
+    bigint operator~() const {
+        // For infinite two's complement: ~x == -x - 1
+        bigint r(*this);
+        r.negate();
+        r -= 1;
+        return r;
+    }
+
+    bigint& operator&=(const bigint& o) {
+        *this = bitwise_binary_op(*this, o, bitwise_op::and_);
+        return *this;
+    }
+
+    bigint& operator|=(const bigint& o) {
+        *this = bitwise_binary_op(*this, o, bitwise_op::or_);
+        return *this;
+    }
+
+    bigint& operator^=(const bigint& o) {
+        *this = bitwise_binary_op(*this, o, bitwise_op::xor_);
+        return *this;
+    }
+
+    bigint operator&(const bigint& o) const { bigint r(*this); r &= o; return r; }
+    bigint operator|(const bigint& o) const { bigint r(*this); r |= o; return r; }
+    bigint operator^(const bigint& o) const { bigint r(*this); r ^= o; return r; }
+
     // ---- Multiply by single limb (internal, used by string conversion) ----
 
     bigint& mul_limb(limb_t b) {
@@ -603,6 +634,53 @@ public:
     }
 
 private:
+    static void to_twos_complement(limb_t* rp, uint32_t n, const bigint& x) {
+        assert(n > 0);
+        mpn_zero(rp, n);
+        uint32_t m = x.abs_size();
+        if (m > 0) std::memcpy(rp, x.data_, (size_t)m * sizeof(limb_t));
+        if (!x.is_negative()) return;
+
+        // Two's complement: ~mag + 1 (within n limbs).
+        mpn_not_n(rp, rp, n);
+        (void)mpn_add_1v(rp, rp, n, 1);
+    }
+
+    static bigint from_twos_complement(const limb_t* ap, uint32_t n) {
+        assert(n > 0);
+        bool neg = (ap[n - 1] >> (LIMB_BITS - 1)) != 0;
+        if (!neg) {
+            uint32_t m = mpn_normalize(ap, n);
+            return from_limbs(ap, m, false);
+        }
+
+        ScratchScope scope(scratch());
+        limb_t* tmp = scope.alloc<limb_t>(n, 32);
+        mpn_not_n(tmp, ap, n);
+        (void)mpn_add_1v(tmp, tmp, n, 1);
+        uint32_t m = mpn_normalize(tmp, n);
+        return from_limbs(tmp, m, true);
+    }
+
+    static bigint bitwise_binary_op(const bigint& a, const bigint& b, bitwise_op op) {
+        uint32_t n = (std::max)(a.abs_size(), b.abs_size()) + 1;
+        ScratchScope scope(scratch());
+        limb_t* atc = scope.alloc<limb_t>(n, 32);
+        limb_t* btc = scope.alloc<limb_t>(n, 32);
+        limb_t* rtc = scope.alloc<limb_t>(n, 32);
+
+        to_twos_complement(atc, n, a);
+        to_twos_complement(btc, n, b);
+
+        switch (op) {
+        case bitwise_op::and_: mpn_and_n(rtc, atc, btc, n); break;
+        case bitwise_op::or_:  mpn_or_n(rtc, atc, btc, n); break;
+        case bitwise_op::xor_: mpn_xor_n(rtc, atc, btc, n); break;
+        }
+
+        return from_twos_complement(rtc, n);
+    }
+
     static constexpr limb_t POW10_18 = 1000000000000000000ULL; // 10^18
     static constexpr int    DIG10_18 = 18;
     static constexpr uint32_t RADIX_DC_THRESHOLD = 30; // limbs: D&C above this

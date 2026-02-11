@@ -10,6 +10,8 @@
 #include <cstring>
 #include <cassert>
 
+#include <immintrin.h>
+
 #ifdef _MSC_VER
 #include <intrin.h>
 #pragma intrinsic(_addcarry_u64, _subborrow_u64, _umul128, _BitScanReverse64, _udiv128)
@@ -78,6 +80,62 @@ inline void mpn_copyi(limb_t* rp, const limb_t* ap, uint32_t n) {
 // Copy n limbs, decreasing address (safe when rp >= ap)
 inline void mpn_copyd(limb_t* rp, const limb_t* ap, uint32_t n) {
     std::memmove(rp, ap, (size_t)n * sizeof(limb_t));
+}
+
+// ============================================================
+// Bitwise ops (on limb arrays)
+// ============================================================
+
+inline void mpn_not_n(limb_t* rp, const limb_t* ap, uint32_t n) {
+    uint32_t i = 0;
+#if defined(__AVX2__)
+    const __m256i ones = _mm256_set1_epi64x(-1);
+    for (; i + 4 <= n; i += 4) {
+        __m256i a = _mm256_loadu_si256((const __m256i*)(ap + i));
+        __m256i r = _mm256_xor_si256(a, ones);
+        _mm256_storeu_si256((__m256i*)(rp + i), r);
+    }
+#endif
+    for (; i < n; ++i) rp[i] = ~ap[i];
+}
+
+inline void mpn_and_n(limb_t* rp, const limb_t* ap, const limb_t* bp, uint32_t n) {
+    uint32_t i = 0;
+#if defined(__AVX2__)
+    for (; i + 4 <= n; i += 4) {
+        __m256i a = _mm256_loadu_si256((const __m256i*)(ap + i));
+        __m256i b = _mm256_loadu_si256((const __m256i*)(bp + i));
+        __m256i r = _mm256_and_si256(a, b);
+        _mm256_storeu_si256((__m256i*)(rp + i), r);
+    }
+#endif
+    for (; i < n; ++i) rp[i] = ap[i] & bp[i];
+}
+
+inline void mpn_or_n(limb_t* rp, const limb_t* ap, const limb_t* bp, uint32_t n) {
+    uint32_t i = 0;
+#if defined(__AVX2__)
+    for (; i + 4 <= n; i += 4) {
+        __m256i a = _mm256_loadu_si256((const __m256i*)(ap + i));
+        __m256i b = _mm256_loadu_si256((const __m256i*)(bp + i));
+        __m256i r = _mm256_or_si256(a, b);
+        _mm256_storeu_si256((__m256i*)(rp + i), r);
+    }
+#endif
+    for (; i < n; ++i) rp[i] = ap[i] | bp[i];
+}
+
+inline void mpn_xor_n(limb_t* rp, const limb_t* ap, const limb_t* bp, uint32_t n) {
+    uint32_t i = 0;
+#if defined(__AVX2__)
+    for (; i + 4 <= n; i += 4) {
+        __m256i a = _mm256_loadu_si256((const __m256i*)(ap + i));
+        __m256i b = _mm256_loadu_si256((const __m256i*)(bp + i));
+        __m256i r = _mm256_xor_si256(a, b);
+        _mm256_storeu_si256((__m256i*)(rp + i), r);
+    }
+#endif
+    for (; i < n; ++i) rp[i] = ap[i] ^ bp[i];
 }
 
 // ============================================================
