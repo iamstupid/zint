@@ -26,11 +26,18 @@ zint_mpn_addmul_1_adx PROC
     mov  ecx, r8d                ; n
     mov  rdx, r9                 ; b (mulx uses rdx)
 
-    xor  eax, eax                ; rax = 0, clear CF/OF
-    jrcxz Lzero
+    test ecx, ecx
+    jz   Lzero
 
-    ; If n is even, do one iteration to make (n-1) odd so that
-    ; after priming, the remaining count is even (processed in pairs).
+    ; pair_count = (n - 1) / 2  (number of 2-limb iterations after priming)
+    lea  r10d, [ecx-1]
+    shr  r10d, 1
+
+    ; Clear CF/OF and set rax = 0 for ADOX.
+    xor  eax, eax
+
+    ; If n is even, do one iteration to make (n-1) odd so that after priming
+    ; the remaining count is even (processed in 2-limb loop iterations).
     test ecx, 1
     jnz  Lpriming
 
@@ -42,7 +49,6 @@ Lpre_even:
 
     lea  rsi, [rsi+8]
     lea  rdi, [rdi+8]
-    lea  ecx, [ecx-1]
 
 Lpriming:
     ; Prime previous-hi in r9.
@@ -53,8 +59,8 @@ Lpriming:
 
     lea  rsi, [rsi+8]
     lea  rdi, [rdi+8]
-    lea  ecx, [ecx-1]
-    jrcxz Lepilogue
+    mov  ecx, r10d
+    jrcxz Lafter_loop
 
 Lloop:
     ; Process 2 limbs per iteration, preserving CF/OF across the loop.
@@ -70,11 +76,9 @@ Lloop:
 
     lea  rsi, [rsi+16]
     lea  rdi, [rdi+16]
-    lea  ecx, [ecx-2]
-    jrcxz Lepilogue
-    jmp  Lloop
+    loop Lloop
 
-Lepilogue:
+Lafter_loop:
     ; carry_out = last_hi + final_OF + final_CF
     mov  ebx, 0                  ; do not clobber flags
     adox r9, rbx
@@ -89,4 +93,3 @@ Lzero:
 zint_mpn_addmul_1_adx ENDP
 
 END
-
