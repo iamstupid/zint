@@ -53,18 +53,30 @@ static volatile std::uint64_t sink_u64 = 0;
 // ------------------------------
 
 static void scalar_and(std::uint64_t* rp, const std::uint64_t* ap, const std::uint64_t* bp, std::uint32_t n) {
+#if defined(_MSC_VER)
+    __pragma(loop(no_vector))
+#endif
     for (std::uint32_t i = 0; i < n; ++i) rp[i] = ap[i] & bp[i];
 }
 
 static void scalar_or(std::uint64_t* rp, const std::uint64_t* ap, const std::uint64_t* bp, std::uint32_t n) {
+#if defined(_MSC_VER)
+    __pragma(loop(no_vector))
+#endif
     for (std::uint32_t i = 0; i < n; ++i) rp[i] = ap[i] | bp[i];
 }
 
 static void scalar_xor(std::uint64_t* rp, const std::uint64_t* ap, const std::uint64_t* bp, std::uint32_t n) {
+#if defined(_MSC_VER)
+    __pragma(loop(no_vector))
+#endif
     for (std::uint32_t i = 0; i < n; ++i) rp[i] = ap[i] ^ bp[i];
 }
 
 static void scalar_not(std::uint64_t* rp, const std::uint64_t* ap, std::uint32_t n) {
+#if defined(_MSC_VER)
+    __pragma(loop(no_vector))
+#endif
     for (std::uint32_t i = 0; i < n; ++i) rp[i] = ~ap[i];
 }
 
@@ -241,4 +253,3 @@ int main(int argc, char** argv) {
     if (sink_u64 == 0x123456789ULL) std::printf("sink=%llu\n", (unsigned long long)sink_u64);
     return 0;
 }
-
