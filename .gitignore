@@ -11,3 +11,4 @@
 *.a
 
 bench/*.csv
+bench/*.png

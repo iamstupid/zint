@@ -415,23 +415,20 @@ public:
     }
 
     bigint& operator&=(const bigint& o) {
-        *this = bitwise_binary_op(*this, o, bitwise_op::and_);
-        return *this;
+        return bitwise_assign(o, bitwise_op::and_);
     }
 
     bigint& operator|=(const bigint& o) {
-        *this = bitwise_binary_op(*this, o, bitwise_op::or_);
-        return *this;
+        return bitwise_assign(o, bitwise_op::or_);
     }
 
     bigint& operator^=(const bigint& o) {
-        *this = bitwise_binary_op(*this, o, bitwise_op::xor_);
-        return *this;
+        return bitwise_assign(o, bitwise_op::xor_);
     }
 
-    bigint operator&(const bigint& o) const { bigint r(*this); r &= o; return r; }
-    bigint operator|(const bigint& o) const { bigint r(*this); r |= o; return r; }
-    bigint operator^(const bigint& o) const { bigint r(*this); r ^= o; return r; }
+    bigint operator&(const bigint& o) const { return bitwise_binary_op(*this, o, bitwise_op::and_); }
+    bigint operator|(const bigint& o) const { return bitwise_binary_op(*this, o, bitwise_op::or_); }
+    bigint operator^(const bigint& o) const { return bitwise_binary_op(*this, o, bitwise_op::xor_); }
 
     // ---- Multiply by single limb (internal, used by string conversion) ----
 
@@ -634,6 +631,87 @@ public:
     }
 
 private:
+    bigint& bitwise_assign(const bigint& o, bitwise_op op) {
+        // Fast path: both operands non-negative => no sign extension needed.
+        if (!is_negative() && !o.is_negative()) {
+            uint32_t an = abs_size();
+            uint32_t bn = o.abs_size();
+
+            if (op == bitwise_op::and_) {
+                uint32_t rn = (an < bn) ? an : bn;
+                if (rn == 0) {
+                    size_ = 0;
+                    return *this;
+                }
+                mpn_and_n(data_, data_, o.data_, rn);
+                set_size_sign(rn, false);
+                trim();
+                return *this;
+            }
+
+            if (an == 0) {
+                *this = o;
+                return *this;
+            }
+            if (bn == 0) {
+                return *this;
+            }
+
+            uint32_t min_n = (an < bn) ? an : bn;
+            uint32_t rn = (an > bn) ? an : bn;
+            ensure_capacity(rn);
+
+            if (op == bitwise_op::or_) mpn_or_n(data_, data_, o.data_, min_n);
+            else mpn_xor_n(data_, data_, o.data_, min_n);
+
+            if (bn > an) mpn_copyi(data_ + min_n, o.data_ + min_n, bn - min_n);
+            set_size_sign(rn, false);
+            trim();
+            return *this;
+        }
+
+        uint32_t n = (std::max)(abs_size(), o.abs_size()) + 1;
+        ScratchScope scope(scratch());
+        limb_t* atc = scope.alloc<limb_t>(n, 32);
+        limb_t* btc = scope.alloc<limb_t>(n, 32);
+        limb_t* rtc = scope.alloc<limb_t>(n, 32);
+
+        to_twos_complement(atc, n, *this);
+        to_twos_complement(btc, n, o);
+
+        switch (op) {
+        case bitwise_op::and_: mpn_and_n(rtc, atc, btc, n); break;
+        case bitwise_op::or_:  mpn_or_n(rtc, atc, btc, n); break;
+        case bitwise_op::xor_: mpn_xor_n(rtc, atc, btc, n); break;
+        }
+
+        bool neg = (rtc[n - 1] >> (LIMB_BITS - 1)) != 0;
+        if (!neg) {
+            uint32_t m = mpn_normalize(rtc, n);
+            if (m == 0) {
+                size_ = 0;
+                return *this;
+            }
+            ensure_capacity(m);
+            std::memcpy(data_, rtc, (size_t)m * sizeof(limb_t));
+            set_size_sign(m, false);
+            return *this;
+        }
+
+        limb_t* tmp = scope.alloc<limb_t>(n, 32);
+        mpn_not_n(tmp, rtc, n);
+        (void)mpn_add_1v(tmp, tmp, n, 1);
+        uint32_t m = mpn_normalize(tmp, n);
+        if (m == 0) {
+            size_ = 0;
+            return *this;
+        }
+        ensure_capacity(m);
+        std::memcpy(data_, tmp, (size_t)m * sizeof(limb_t));
+        set_size_sign(m, true);
+        return *this;
+    }
+
     static void to_twos_complement(limb_t* rp, uint32_t n, const bigint& x) {
         assert(n > 0);
         mpn_zero(rp, n);
