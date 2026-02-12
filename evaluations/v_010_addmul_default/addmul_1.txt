@@ -1,0 +1,3 @@
+﻿bench_addmul_1.cpp
+.\zint/mpn.hpp(348): warning C4141: “inline”: 使用了多次
+.\zint/mpn.hpp(407): warning C4141: “inline”: 使用了多次
