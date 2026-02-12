@@ -93,7 +93,7 @@ python zint\scripts\plot_compare.py --csv $baseSqrCsv --out $baseSqrPng --title 
 # Build + run addmul_1 benchmarks (scalar vs mpn_addmul_1_fast).
 cl /nologo /I. /std:c++17 /O2 /EHsc /arch:AVX2 /DZINT_USE_ADX_ASM=1 zint\bench\bench_addmul_1.cpp zint\\asm\\addmul_1_adx.obj /Fe:zint\bench\bench_addmul_1.exe | Out-File -Encoding utf8 $addmulOut
 cmd /c "zint\\bench\\bench_addmul_1.exe --csv zint\\evaluations\\$Version\\addmul_1.csv" | Out-File -Append -Encoding utf8 $addmulOut
-python zint\scripts\plot_compare.py --csv $addmulCsv --out $addmulPng --title "mpn_addmul_1_fast vs scalar" | Out-File -Append -Encoding utf8 $addmulOut
+python zint\scripts\plot_compare.py --csv $addmulCsv --out $addmulPng --title "mpn_addmul_1 (default) vs scalar" | Out-File -Append -Encoding utf8 $addmulOut
 
 # Create a report stub if missing.
 $report = Join-Path $evalDir "report.md"

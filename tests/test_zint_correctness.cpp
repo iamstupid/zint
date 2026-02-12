@@ -284,7 +284,7 @@ static void test_bitwise_algebra_and_mod2k() {
     }
 }
 
-static void test_mpn_addmul_1_fast() {
+static void test_mpn_addmul_1_default() {
     zint::xoshiro256pp rng(6);
 
     for (int t = 0; t < 5000; ++t) {
@@ -300,8 +300,8 @@ static void test_mpn_addmul_1_fast() {
         r1 = r0;
         r2 = r0;
 
-        zint::limb_t c1 = zint::mpn_addmul_1(r1.data(), a.data(), n, b);
-        zint::limb_t c2 = zint::mpn_addmul_1_fast(r2.data(), a.data(), n, b);
+        zint::limb_t c1 = zint::mpn_addmul_1_scalar(r1.data(), a.data(), n, b);
+        zint::limb_t c2 = zint::mpn_addmul_1(r2.data(), a.data(), n, b);
 
         ZINT_ASSERT(c1 == c2);
         ZINT_ASSERT(std::memcmp(r1.data(), r2.data(), (size_t)n * sizeof(zint::limb_t)) == 0);
@@ -352,7 +352,7 @@ int main() {
     test_decimal_roundtrip_and_cache();
     test_non_decimal_roundtrip();
     test_bitwise_algebra_and_mod2k();
-    test_mpn_addmul_1_fast();
+    test_mpn_addmul_1_default();
     test_mpn_addlsh_n();
     std::printf("OK\n");
     return 0;

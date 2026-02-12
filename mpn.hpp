@@ -345,7 +345,7 @@ inline limb_t mpn_mul_1(limb_t* rp, const limb_t* ap, uint32_t n, limb_t b) {
 }
 
 // rp[0..n) += ap[0..n) * b, return carry limb
-inline limb_t mpn_addmul_1(limb_t* rp, const limb_t* ap, uint32_t n, limb_t b) {
+ZINT_FORCEINLINE inline limb_t mpn_addmul_1_scalar(limb_t* rp, const limb_t* ap, uint32_t n, limb_t b) {
     limb_t carry = 0;
     for (uint32_t i = 0; i < n; i++) {
 #ifdef __SIZEOF_INT128__
@@ -393,14 +393,23 @@ inline bool cpu_has_bmi2_adx_cached() {
 #endif
 }
 
-// Safe wrapper: uses ADX kernel when available, otherwise falls back to scalar mpn_addmul_1.
-inline limb_t mpn_addmul_1_fast(limb_t* rp, const limb_t* ap, uint32_t n, limb_t b) {
+// Default implementation: uses ADX kernel when available, otherwise falls back to scalar.
+inline limb_t mpn_addmul_1(limb_t* rp, const limb_t* ap, uint32_t n, limb_t b) {
 #if defined(_MSC_VER) && defined(_M_X64) && defined(ZINT_USE_ADX_ASM)
     if (n >= 3 && cpu_has_bmi2_adx_cached()) {
         return (limb_t)zint_mpn_addmul_1_adx((std::uint64_t*)rp, (const std::uint64_t*)ap, n, (std::uint64_t)b);
     }
 #endif
-    return mpn_addmul_1(rp, ap, n, b);
+    return mpn_addmul_1_scalar(rp, ap, n, b);
+}
+
+// Explicit name kept for benchmarks/callers; identical to mpn_addmul_1.
+ZINT_FORCEINLINE inline limb_t mpn_addmul_1_fast(limb_t* rp, const limb_t* ap, uint32_t n, limb_t b) {
+#if defined(_MSC_VER) && defined(_M_X64) && defined(ZINT_USE_ADX_ASM)
+    // Keep tiny sizes on the scalar path (branch predictor + call overhead dominates).
+    if (n >= 3) return mpn_addmul_1(rp, ap, n, b);
+#endif
+    return mpn_addmul_1_scalar(rp, ap, n, b);
 }
 
 // rp[0..n) -= ap[0..n) * b, return borrow limb

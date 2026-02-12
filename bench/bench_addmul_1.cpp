@@ -1,8 +1,8 @@
 // bench_addmul_1.cpp - Benchmark mpn_addmul_1 scalar vs ADX-gated fast path
 //
 // Measures:
-// - mpn_addmul_1 (scalar)
-// - mpn_addmul_1_fast (uses ADX/BMI2 kernel when available)
+// - mpn_addmul_1_scalar (baseline)
+// - mpn_addmul_1 (default: uses ADX/BMI2 when available)
 //
 // CSV schema: n,bi_us,zint_us,zint_over_bi
 
@@ -98,13 +98,13 @@ int main(int argc, char** argv) {
 
         r1 = r0;
         double base_ns = bench_best_ns(iters, [&]() {
-            sink_u64 ^= (std::uint64_t)zint::mpn_addmul_1((zint::limb_t*)r1.data(), (const zint::limb_t*)a.data(), n, (zint::limb_t)b);
+            sink_u64 ^= (std::uint64_t)zint::mpn_addmul_1_scalar((zint::limb_t*)r1.data(), (const zint::limb_t*)a.data(), n, (zint::limb_t)b);
             sink_u64 ^= r1[0];
         });
 
         r2 = r0;
         double fast_ns = bench_best_ns(iters, [&]() {
-            sink_u64 ^= (std::uint64_t)zint::mpn_addmul_1_fast((zint::limb_t*)r2.data(), (const zint::limb_t*)a.data(), n, (zint::limb_t)b);
+            sink_u64 ^= (std::uint64_t)zint::mpn_addmul_1((zint::limb_t*)r2.data(), (const zint::limb_t*)a.data(), n, (zint::limb_t)b);
             sink_u64 ^= r2[0];
         });
 
@@ -116,4 +116,3 @@ int main(int argc, char** argv) {
     if (sink_u64 == 0x123456789ULL) std::printf("sink=%llu\n", (unsigned long long)sink_u64);
     return 0;
 }
-
