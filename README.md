@@ -13,6 +13,7 @@ kernels (ADX/BMI2) and AVX2-accelerated NTT multiplication.
 - **AVX2 throughout**: bitwise ops, shifts, carry propagation, comparison, NTT butterflies
 - **Thread-local bump allocator** (`scratch.hpp`): zero-overhead temp memory via mark/restore
 - **ASM kernels**: `addmul_1` (ADX dual-carry, 1.7 cyc/limb on Zen 4), `submul_1`, fused `mul_basecase`; MASM on Windows, GAS on Linux/macOS
+- **Compact**: ~5,900 SLOC across 35 files (32 C++ headers + 3 ASM kernels)
 
 ## Quick start
 
