@@ -10,5 +10,9 @@
 *.dylib
 *.a
 
-bench/*.csv
-bench/*.png
+bench/
+evaluations/
+scripts/
+tests/
+WORKFLOW.md
+nul

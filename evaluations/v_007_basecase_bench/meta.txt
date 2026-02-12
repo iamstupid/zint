@@ -1,5 +1,0 @@
-﻿date_utc=2026-02-11T17:31:58.7137224Z
-parent_repo=C:\Users\zball\Documents\bigint\NTT3
-parent_head=b5fc6948e265a5de98c32e0bc8a5b595a15d00a2
-zint_repo=C:\Users\zball\Documents\bigint\NTT3\zint
-zint_head=101fbb9fcf0a760d35fe417b48f4b69aa5fb6ad7
