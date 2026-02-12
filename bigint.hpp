@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <utility>
 #include <iostream>
+#include <cmath>
 
 namespace zint {
 
@@ -483,40 +484,118 @@ public:
         set_size_sign(n, is_negative());
     }
 
-    // ---- Radix power cache (optional) ----
+    // ---- Radix conversion utilities ----
+
+    static constexpr const char* RADIX_ALPHABET =
+        "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz+/";
+
+    // Reverse mapping: char -> digit value, or -1 for invalid.
+    // Bases <= 36: case-insensitive (both 'a' and 'A' map to 10).
+    // Bases > 36: case-sensitive ('A'=10..35, 'a'=36..61, '+'=62, '/'=63).
+    static int digit_value(char c, uint32_t base) {
+        int v;
+        if (c >= '0' && c <= '9') v = c - '0';
+        else if (c >= 'A' && c <= 'Z') v = c - 'A' + 10;
+        else if (c >= 'a' && c <= 'z') {
+            v = (base <= 36) ? (c - 'a' + 10) : (c - 'a' + 36);
+        }
+        else if (c == '+') v = 62;
+        else if (c == '/') v = 63;
+        else return -1;
+        return (v < (int)base) ? v : -1;
+    }
+
+    // Returns log2(base) if base is a power of 2, else 0.
+    static unsigned pow2_shift(uint32_t base) {
+        if (base < 2 || (base & (base - 1)) != 0) return 0;
+        unsigned s = 0;
+        uint32_t v = base;
+        while (v > 1) { v >>= 1; s++; }
+        return s;
+    }
+
+    // Max k where base^k fits in u64.
+    static uint32_t compute_chunk_k(uint32_t base) {
+        uint32_t k = 0;
+        limb_t pow = 1;
+        while (pow <= UINT64_MAX / base) {
+            pow *= base;
+            k++;
+        }
+        return k;
+    }
+
+    // Compute base^k as u64 (must fit).
+    static limb_t compute_pow(uint32_t base, uint32_t k) {
+        limb_t pow = 1;
+        for (uint32_t i = 0; i < k; i++) pow *= base;
+        return pow;
+    }
+
+    // Max t where base^t <= max_lut_size.
+    static uint32_t compute_lut_t(uint32_t base, uint32_t max_lut_size) {
+        uint32_t t = 0;
+        uint32_t pow = 1;
+        while (pow <= max_lut_size / base) {
+            pow *= base;
+            t++;
+        }
+        return t;
+    }
+
+    // Upper bound on number of base-b digits for a number with 'bits' bits.
+    static uint32_t est_radix_digits(uint32_t bits, uint32_t base) {
+        if (bits == 0) return 1;
+        return (uint32_t)std::ceil((double)bits / std::log2((double)base)) + 1;
+    }
+
+    // ---- Radix power cache ----
     //
-    // Stores powers base^(2^k) lazily. Used by radix conversion routines
-    // (notably base-10 D&C conversion). By default, to_string/from_string will
-    // compute and free powers on-the-fly; users may inject a cache to reuse
-    // powers across repeated conversions.
-    //
+    // Stores chunk_pow^(2^k) lazily, where chunk_pow = base^chunk_k
+    // and chunk_k = max digits fitting in one u64 limb.
+    // Used by D&C radix conversion for any base 2-64.
     // Not thread-safe if shared across threads.
     struct radix_powers_cache {
         struct entry {
-            limb_t* data = nullptr;
+            limb_t* data = nullptr;      // chunk_pow^(2^k) = base^(chunk_k * 2^k)
             uint32_t size = 0;
+            limb_t* d_norm = nullptr;    // normalized: data << shift
+            limb_t* inv = nullptr;       // Newton reciprocal of d_norm
+            unsigned shift = 0;
         };
 
-        limb_t base = 0;
-        std::vector<entry> pow2k{}; // pow2k[k] = base^(2^k)
+        uint32_t radix = 0;              // user base (2..64)
+        uint32_t chunk_k = 0;            // digits per machine-word chunk
+        limb_t   chunk_pow = 0;          // base^chunk_k
+        uint32_t lut_t_ = 0;            // LUT width (digits per LUT entry)
+        uint32_t lut_pow = 0;           // base^lut_t_
+        char*    to_str_lut = nullptr;   // lut_pow * lut_t_ chars
+        std::vector<entry> pow2k{};      // pow2k[k] = chunk_pow^(2^k)
 
         radix_powers_cache() = default;
-        explicit radix_powers_cache(limb_t b) { reset(b); }
+        explicit radix_powers_cache(uint32_t base) { reset(base); }
 
         radix_powers_cache(const radix_powers_cache&) = delete;
         radix_powers_cache& operator=(const radix_powers_cache&) = delete;
 
         radix_powers_cache(radix_powers_cache&& o) noexcept
-            : base(o.base), pow2k(std::move(o.pow2k)) {
-            o.base = 0;
+            : radix(o.radix), chunk_k(o.chunk_k), chunk_pow(o.chunk_pow),
+              lut_t_(o.lut_t_), lut_pow(o.lut_pow), to_str_lut(o.to_str_lut),
+              pow2k(std::move(o.pow2k))
+        {
+            o.radix = 0;
+            o.to_str_lut = nullptr;
             o.pow2k.clear();
         }
         radix_powers_cache& operator=(radix_powers_cache&& o) noexcept {
             if (this != &o) {
                 clear();
-                base = o.base;
+                radix = o.radix; chunk_k = o.chunk_k; chunk_pow = o.chunk_pow;
+                lut_t_ = o.lut_t_; lut_pow = o.lut_pow;
+                to_str_lut = o.to_str_lut;
                 pow2k = std::move(o.pow2k);
-                o.base = 0;
+                o.radix = 0;
+                o.to_str_lut = nullptr;
                 o.pow2k.clear();
             }
             return *this;
@@ -527,84 +606,129 @@ public:
         void clear() noexcept {
             for (auto& e : pow2k) {
                 mpn_free(e.data);
-                e.data = nullptr;
-                e.size = 0;
+                mpn_free(e.d_norm);
+                mpn_free(e.inv);
             }
             pow2k.clear();
-            base = 0;
+            delete[] to_str_lut;
+            to_str_lut = nullptr;
+            radix = 0;
         }
 
-        void reset(limb_t b) {
-            if (base == b && !pow2k.empty()) return;
+        void reset(uint32_t base) {
+            if (radix == base && !pow2k.empty()) return;
             clear();
-            base = b;
-            if (base == 0) return;
-            limb_t* d = mpn_alloc(1);
-            d[0] = base;
-            pow2k.push_back({d, 1});
+            radix = base;
+            if (base < 2) return;
+
+            chunk_k = compute_chunk_k(base);
+            chunk_pow = compute_pow(base, chunk_k);
+            lut_t_ = compute_lut_t(base, RADIX_LUT_MAX_SIZE);
+            lut_pow = (uint32_t)compute_pow(base, lut_t_);
+
+            // Build to_string LUT
+            to_str_lut = new char[(size_t)lut_pow * lut_t_];
+            for (uint32_t v = 0; v < lut_pow; v++) {
+                char* dst = to_str_lut + (size_t)v * lut_t_;
+                uint32_t tmp = v;
+                for (int j = (int)lut_t_ - 1; j >= 0; j--) {
+                    dst[j] = RADIX_ALPHABET[tmp % base];
+                    tmp /= base;
+                }
+            }
+
+            // pow2k[0] = chunk_pow (single limb)
+            pow2k.push_back({mpn_alloc(1), 1, nullptr, nullptr, 0});
+            pow2k.back().data[0] = chunk_pow;
         }
 
         const entry& get_pow2k(uint32_t k) {
-            assert(base != 0);
+            assert(radix >= 2);
             while (k >= (uint32_t)pow2k.size()) {
                 const entry& prev = pow2k.back();
                 uint32_t rn = 2 * prev.size;
                 limb_t* rp = mpn_alloc(rn);
                 mpn_sqr(rp, prev.data, prev.size);
                 rn = mpn_normalize(rp, rn);
-                pow2k.push_back({rp, rn});
+                pow2k.push_back({rp, rn, nullptr, nullptr, 0});
             }
             return pow2k[k];
         }
+
+        void ensure_reciprocal(uint32_t k) {
+            assert(k < (uint32_t)pow2k.size());
+            auto& e = pow2k[k];
+            if (e.inv) return;
+            if (e.size < DIV_DC_THRESHOLD) return;
+
+            e.shift = clz64(e.data[e.size - 1]);
+            e.d_norm = mpn_alloc(e.size);
+            if (e.shift > 0)
+                mpn_lshift(e.d_norm, e.data, e.size, e.shift);
+            else
+                std::memcpy(e.d_norm, e.data, e.size * sizeof(limb_t));
+
+            e.inv = mpn_alloc(e.size);
+            mpn_newton_invert(e.inv, e.d_norm, e.size);
+        }
     };
 
-    // ---- String conversion (O(n^2) basecase) ----
+    // ---- String conversion ----
+    // All non-power-of-2 bases use D&C O(M(n) log n).
+    // Power-of-2 bases (2,4,8,16,32,64) use O(n) bit extraction.
 
     std::string to_string(int base = 10, radix_powers_cache* pow_cache = nullptr) const {
+        assert(base >= 2 && base <= 64);
         if (is_zero()) return "0";
-        assert(base >= 2 && base <= 36);
 
-        // For base 10, use chunks of 10^18
-        if (base == 10) return to_decimal_string(pow_cache);
+        unsigned shift = pow2_shift((uint32_t)base);
+        if (shift) return pow2_to_string(*this, shift);
 
-        // Generic base conversion
-        bigint tmp = this->abs();
+        // General D&C path for all non-power-of-2 bases
         std::string result;
-        static const char digits[] = "0123456789abcdefghijklmnopqrstuvwxyz";
-
-        while (!tmp.is_zero()) {
-            limb_t rem = tmp.div_limb((limb_t)base);
-            result.push_back(digits[rem]);
-        }
-
         if (is_negative()) result.push_back('-');
-        std::reverse(result.begin(), result.end());
+
+        bigint tmp = this->abs();
+        uint32_t est = est_radix_digits(bit_length(), (uint32_t)base);
+
+        radix_powers_cache local;
+        if (!pow_cache) {
+            local.reset((uint32_t)base);
+            pow_cache = &local;
+        } else {
+            if (pow_cache->radix == 0) pow_cache->reset((uint32_t)base);
+            else assert(pow_cache->radix == (uint32_t)base);
+        }
+        dc_to_radix(result, tmp, est, 0, *pow_cache);
         return result;
     }
 
-    // Construct from decimal string
     static bigint from_string(const char* s, int base = 10, radix_powers_cache* pow_cache = nullptr) {
-        assert(base >= 2 && base <= 36);
+        assert(base >= 2 && base <= 64);
         if (!s || !*s) return bigint();
 
         bool neg = false;
         if (*s == '-') { neg = true; s++; }
-        else if (*s == '+') { s++; }
+        else if (*s == '+' && base <= 62) { s++; }
 
-        if (base == 10) return from_decimal_string(s, neg, pow_cache);
+        // Skip leading zeros
+        size_t len = std::strlen(s);
+        while (len > 1 && *s == '0') { s++; len--; }
 
-        bigint result;
-        for (; *s; s++) {
-            int d;
-            char c = *s;
-            if (c >= '0' && c <= '9') d = c - '0';
-            else if (c >= 'a' && c <= 'z') d = c - 'a' + 10;
-            else if (c >= 'A' && c <= 'Z') d = c - 'A' + 10;
-            else break; // stop at non-digit
-            if (d >= base) break;
-            result.mul_limb((limb_t)base);
-            result.add_limb((limb_t)d);
+        unsigned shift = pow2_shift((uint32_t)base);
+        if (shift) return pow2_from_string(s, (uint32_t)len, shift, neg);
+
+        // General D&C path
+        radix_powers_cache local;
+        if (!pow_cache) {
+            local.reset((uint32_t)base);
+            pow_cache = &local;
+        } else {
+            if (pow_cache->radix == 0) pow_cache->reset((uint32_t)base);
+            else assert(pow_cache->radix == (uint32_t)base);
         }
+
+        bigint result = dc_from_radix(s, (uint32_t)len, *pow_cache);
         if (neg && !result.is_zero()) result.negate();
         return result;
     }
@@ -794,18 +918,6 @@ private:
         return from_twos_complement(rtc, n);
     }
 
-    static constexpr limb_t POW10_18 = 1000000000000000000ULL; // 10^18
-    static constexpr int    DIG10_18 = 18;
-    static constexpr uint32_t RADIX_DC_THRESHOLD = 30; // limbs: D&C above this
-
-    // Powers of 10 are provided via radix_powers_cache (on-the-fly by default).
-
-    // Upper bound on decimal digits for a number with 'bits' bits
-    static uint32_t est_decimal_digits(uint32_t bits) {
-        if (bits == 0) return 1;
-        return (uint32_t)(((uint64_t)bits * 78 + 255) / 256) + 1;
-    }
-
     // Construct non-negative bigint from raw limb array
     static bigint from_limbs_unsigned(const limb_t* p, uint32_t n) {
         bigint r;
@@ -817,97 +929,202 @@ private:
         return r;
     }
 
-    // ---- Basecase to_decimal: O(n^2) via repeated div by 10^18 ----
-    static void basecase_to_decimal(std::string& out, bigint& x, uint32_t pad) {
-        std::vector<std::string> groups;
-        while (!x.is_zero()) {
-            limb_t rem = x.div_limb(POW10_18);
-            groups.push_back(std::to_string(rem));
+    // ---- Power-of-2 fast path: O(n) bit extraction ----
+
+    static std::string pow2_to_string(const bigint& x, unsigned shift) {
+        uint32_t bits = x.bit_length();
+        uint32_t n_digits = (bits + shift - 1) / shift;
+        std::string result;
+        result.reserve(n_digits + 1);
+        if (x.is_negative()) result.push_back('-');
+
+        uint32_t mask = (1u << shift) - 1;
+        const limb_t* p = x.limbs();
+        uint32_t n = x.abs_size();
+
+        for (int i = (int)n_digits - 1; i >= 0; i--) {
+            uint32_t bit_pos = (uint32_t)i * shift;
+            uint32_t limb_idx = bit_pos / 64;
+            unsigned bit_off = bit_pos % 64;
+            uint32_t val = 0;
+            if (limb_idx < n) {
+                val = (uint32_t)((p[limb_idx] >> bit_off) & mask);
+                if (bit_off + shift > 64 && limb_idx + 1 < n) {
+                    val |= (uint32_t)((p[limb_idx + 1] << (64 - bit_off)) & mask);
+                }
+            }
+            result.push_back(RADIX_ALPHABET[val]);
         }
-        if (groups.empty()) {
+        return result;
+    }
+
+    static bigint pow2_from_string(const char* s, uint32_t len, unsigned shift, bool neg) {
+        if (len == 0) return bigint();
+        uint32_t total_bits = len * shift;
+        uint32_t n_limbs = (total_bits + 63) / 64;
+
+        bigint result;
+        result.ensure_capacity(n_limbs);
+        limb_t* rp = result.data_;
+        mpn_zero(rp, n_limbs);
+
+        uint32_t base = 1u << shift;
+        for (uint32_t i = 0; i < len; i++) {
+            int v = digit_value(s[len - 1 - i], base);
+            if (v < 0) break;
+            uint32_t bit_pos = i * shift;
+            uint32_t limb_idx = bit_pos / 64;
+            unsigned bit_off = bit_pos % 64;
+            rp[limb_idx] |= (limb_t)(uint32_t)v << bit_off;
+            if (bit_off + shift > 64 && limb_idx + 1 < n_limbs) {
+                rp[limb_idx + 1] |= (limb_t)(uint32_t)v >> (64 - bit_off);
+            }
+        }
+        n_limbs = mpn_normalize(rp, n_limbs);
+        result.set_size_sign(n_limbs, neg && n_limbs > 0);
+        return result;
+    }
+
+    // ---- Generalized basecase to_radix: O(n^2) via div_limb(chunk_pow) + LUT ----
+
+    // Convert a single u64 chunk value to exactly chunk_k digits using LUT.
+    static void limb_to_radix_string(char* buf, limb_t val,
+                                      const radix_powers_cache& cache) {
+        int pos = (int)cache.chunk_k;
+        // LUT-accelerated: extract lut_t_ digits at a time
+        while (pos >= (int)cache.lut_t_) {
+            limb_t idx = val % cache.lut_pow;
+            val /= cache.lut_pow;
+            pos -= (int)cache.lut_t_;
+            std::memcpy(buf + pos, cache.to_str_lut + idx * cache.lut_t_, cache.lut_t_);
+        }
+        // Handle remaining digits (when chunk_k % lut_t_ != 0)
+        while (pos > 0) {
+            buf[--pos] = RADIX_ALPHABET[val % cache.radix];
+            val /= cache.radix;
+        }
+    }
+
+    static void basecase_to_radix(std::string& out, bigint& x, uint32_t pad,
+                                   const radix_powers_cache& cache) {
+        // Extract chunks (each is a u64 in [0, chunk_pow))
+        // Use a small stack buffer to avoid vector allocation
+        limb_t chunk_buf[64]; // enough for 64 limbs * 19 digits = 1216 digits
+        uint32_t n_chunks = 0;
+        while (!x.is_zero()) {
+            assert(n_chunks < 64);
+            chunk_buf[n_chunks++] = x.div_limb(cache.chunk_pow);
+        }
+        if (n_chunks == 0) {
             if (pad > 0) out.append(pad, '0');
             return;
         }
-        std::string s = groups.back();
-        for (int i = (int)groups.size() - 2; i >= 0; i--) {
-            const std::string& g = groups[i];
-            if (g.size() < (size_t)DIG10_18)
-                s.append((size_t)DIG10_18 - g.size(), '0');
-            s += g;
+
+        // Convert highest chunk (no leading-zero padding)
+        std::string s;
+        s.reserve(n_chunks * cache.chunk_k);
+        {
+            limb_t val = chunk_buf[n_chunks - 1];
+            if (val == 0) {
+                s.push_back('0');
+            } else {
+                char tmp[20]; // max 19 digits for base 10, chunk_k <= 64
+                int pos = 0;
+                while (val > 0) {
+                    tmp[pos++] = RADIX_ALPHABET[val % cache.radix];
+                    val /= cache.radix;
+                }
+                for (int i = pos - 1; i >= 0; i--)
+                    s.push_back(tmp[i]);
+            }
         }
+
+        // Remaining chunks: zero-padded to chunk_k digits, using LUT
+        char cbuf[64]; // chunk_k <= 64
+        for (int i = (int)n_chunks - 2; i >= 0; i--) {
+            limb_to_radix_string(cbuf, chunk_buf[i], cache);
+            s.append(cbuf, cache.chunk_k);
+        }
+
         if (pad > 0 && s.size() < (size_t)pad)
             out.append((size_t)pad - s.size(), '0');
         out += s;
     }
 
-    // ---- D&C to_decimal: O(M(n) log n) ----
-    static void dc_to_decimal(std::string& out, bigint& x,
-                               uint32_t est_digits, uint32_t pad,
-                               radix_powers_cache& pow_cache) {
+    // ---- Generalized D&C to_radix: O(M(n) log n) ----
+
+    static void dc_to_radix(std::string& out, bigint& x,
+                              uint32_t est_digits, uint32_t pad,
+                              radix_powers_cache& cache) {
         if (x.is_zero()) {
             if (pad > 0) out.append(pad, '0');
             return;
         }
         if (x.abs_size() <= RADIX_DC_THRESHOLD) {
-            basecase_to_decimal(out, x, pad);
+            basecase_to_radix(out, x, pad, cache);
             return;
         }
 
         // Tighten estimate from actual bit length
-        uint32_t actual_est = est_decimal_digits(x.bit_length());
+        uint32_t actual_est = est_radix_digits(x.bit_length(), cache.radix);
         if (actual_est < est_digits) est_digits = actual_est;
 
-        uint32_t half = est_digits / 2;
-        if (half < 1) half = 1;
+        // Split in chunk units: find k such that chunk_k * 2^k ~ est_digits/2
+        uint32_t est_chunks = (est_digits + cache.chunk_k - 1) / cache.chunk_k;
+        uint32_t half_chunks = est_chunks / 2;
+        if (half_chunks < 1) half_chunks = 1;
         uint32_t k = 0;
-        while ((1u << (k + 1)) <= half) k++;
-        uint32_t split = 1u << k;
+        while ((1u << (k + 1)) <= half_chunks) k++;
+        uint32_t split_digits = cache.chunk_k * (1u << k);
 
-        const auto& pow = pow_cache.get_pow2k(k);
-        bigint pow_bi = from_limbs_unsigned(pow.data, pow.size);
+        const auto& pow = cache.get_pow2k(k);
+        uint32_t nn = x.abs_size(), dn = pow.size;
+
         bigint q, r;
-        divmod(x, pow_bi, q, r);
-
-        // High part (quotient)
-        uint32_t high_pad = (pad > split) ? pad - split : 0;
-        dc_to_decimal(out, q, est_digits - split, high_pad, pow_cache);
-        // Low part (remainder, zero-padded to split digits)
-        dc_to_decimal(out, r, split, split, pow_cache);
-    }
-
-    std::string to_decimal_string(radix_powers_cache* pow_cache) const {
-        uint32_t nn = abs_size();
-        if (nn == 0) return "0";
-
-        bigint tmp = this->abs();
-        std::string result;
-        if (is_negative()) result.push_back('-');
-
-        uint32_t est = est_decimal_digits(bit_length());
-        radix_powers_cache local;
-        if (!pow_cache) {
-            local.reset(10);
-            pow_cache = &local;
+        if (nn < dn || (nn == dn && mpn_cmp(x.data_, pow.data, dn) < 0)) {
+            r = std::move(x);
         } else {
-            if (pow_cache->base == 0) pow_cache->reset(10);
-            else assert(pow_cache->base == 10);
+            uint32_t qn = nn - dn + 1;
+            q.ensure_capacity(qn);
+            r.ensure_capacity(dn);
+
+            cache.ensure_reciprocal(k);
+            if (pow.inv) {
+                mpn_tdiv_qr_preinv(q.data_, r.data_, x.data_, nn,
+                                    pow.d_norm, dn, pow.inv, pow.shift);
+            } else {
+                mpn_tdiv_qr(q.data_, r.data_, x.data_, nn, pow.data, dn);
+            }
+
+            qn = mpn_normalize(q.data_, qn);
+            uint32_t rn = mpn_normalize(r.data_, dn);
+            q.set_size_sign(qn, false);
+            r.set_size_sign(rn, false);
         }
-        dc_to_decimal(result, tmp, est, 0, *pow_cache);
-        return result;
+
+        uint32_t high_pad = (pad > split_digits) ? pad - split_digits : 0;
+        dc_to_radix(out, q, est_digits - split_digits, high_pad, cache);
+        dc_to_radix(out, r, split_digits, split_digits, cache);
     }
 
-    // ---- Basecase from_decimal: O(n^2) via 18-digit chunks ----
-    static bigint basecase_from_decimal(const char* s, uint32_t len) {
+    // ---- Generalized basecase from_radix: O(n^2) via chunk_k-char groups ----
+
+    static bigint basecase_from_radix(const char* s, uint32_t len,
+                                       const radix_powers_cache& cache) {
         bigint result;
         uint32_t pos = 0;
+        uint32_t base = cache.radix;
 
-        // First partial chunk (align remaining to 18-digit boundaries)
-        uint32_t first = len % DIG10_18;
-        if (first == 0 && len > 0) first = DIG10_18;
+        // First partial chunk (align remaining to chunk_k boundaries)
+        uint32_t first = len % cache.chunk_k;
+        if (first == 0 && len > 0) first = cache.chunk_k;
 
         limb_t val = 0;
-        for (uint32_t i = 0; i < first; i++)
-            val = val * 10 + (s[i] - '0');
+        for (uint32_t i = 0; i < first; i++) {
+            int d = digit_value(s[i], base);
+            if (d < 0) d = 0;
+            val = val * base + (limb_t)d;
+        }
         pos = first;
 
         if (val > 0) {
@@ -918,56 +1135,47 @@ private:
 
         while (pos < len) {
             limb_t chunk = 0;
-            for (int i = 0; i < DIG10_18; i++)
-                chunk = chunk * 10 + (s[pos + i] - '0');
-            pos += DIG10_18;
-            result.mul_limb(POW10_18);
+            for (uint32_t i = 0; i < cache.chunk_k; i++) {
+                int d = digit_value(s[pos + i], base);
+                if (d < 0) d = 0;
+                chunk = chunk * base + (limb_t)d;
+            }
+            pos += cache.chunk_k;
+            result.mul_limb(cache.chunk_pow);
             result.add_limb(chunk);
         }
         return result;
     }
 
-    // ---- D&C from_decimal: O(M(n) log n) ----
-    static bigint dc_from_decimal(const char* s, uint32_t len, radix_powers_cache& pow_cache) {
+    // ---- Generalized D&C from_radix: O(M(n) log n) ----
+
+    static bigint dc_from_radix(const char* s, uint32_t len,
+                                  radix_powers_cache& cache) {
         if (len == 0) return bigint();
-        if (len <= (uint32_t)DIG10_18 * RADIX_DC_THRESHOLD)
-            return basecase_from_decimal(s, len);
+        if (len <= cache.chunk_k * RADIX_DC_THRESHOLD)
+            return basecase_from_radix(s, len, cache);
 
-        // Split: low part has 2^k digits, high part has (len - 2^k) digits
-        uint32_t half = len / 2;
+        // Split in chunk units
+        uint32_t est_chunks = (len + cache.chunk_k - 1) / cache.chunk_k;
+        uint32_t half_chunks = est_chunks / 2;
+        if (half_chunks < 1) half_chunks = 1;
         uint32_t k = 0;
-        while ((1u << (k + 1)) <= half) k++;
-        uint32_t split = 1u << k;
+        while ((1u << (k + 1)) <= half_chunks) k++;
+        uint32_t split_digits = cache.chunk_k * (1u << k);
 
-        bigint high = dc_from_decimal(s, len - split, pow_cache);
-        bigint low  = dc_from_decimal(s + (len - split), split, pow_cache);
+        // Safety: ensure split doesn't exceed len
+        if (split_digits >= len) {
+            return basecase_from_radix(s, len, cache);
+        }
 
-        const auto& pow = pow_cache.get_pow2k(k);
+        bigint high = dc_from_radix(s, len - split_digits, cache);
+        bigint low  = dc_from_radix(s + (len - split_digits), split_digits, cache);
+
+        const auto& pow = cache.get_pow2k(k);
         bigint pow_bi = from_limbs_unsigned(pow.data, pow.size);
         high *= pow_bi;
         high += low;
         return high;
-    }
-
-    static bigint from_decimal_string(const char* s, bool neg, radix_powers_cache* pow_cache) {
-        size_t len = std::strlen(s);
-        if (len == 0) return bigint();
-
-        // Skip leading zeros
-        while (len > 1 && *s == '0') { s++; len--; }
-
-        radix_powers_cache local;
-        if (!pow_cache) {
-            local.reset(10);
-            pow_cache = &local;
-        } else {
-            if (pow_cache->base == 0) pow_cache->reset(10);
-            else assert(pow_cache->base == 10);
-        }
-
-        bigint result = dc_from_decimal(s, (uint32_t)len, *pow_cache);
-        if (neg && !result.is_zero()) result.negate();
-        return result;
     }
 
 public:

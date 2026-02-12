@@ -103,53 +103,45 @@ inline void mpn_copyd(limb_t* rp, const limb_t* ap, uint32_t n) {
 
 inline void mpn_not_n(limb_t* rp, const limb_t* ap, uint32_t n) {
     uint32_t i = 0;
-#if defined(__AVX2__)
     const __m256i ones = _mm256_set1_epi64x(-1);
     for (; i + 4 <= n; i += 4) {
         __m256i a = _mm256_loadu_si256((const __m256i*)(ap + i));
         __m256i r = _mm256_xor_si256(a, ones);
         _mm256_storeu_si256((__m256i*)(rp + i), r);
     }
-#endif
     for (; i < n; ++i) rp[i] = ~ap[i];
 }
 
 inline void mpn_and_n(limb_t* rp, const limb_t* ap, const limb_t* bp, uint32_t n) {
     uint32_t i = 0;
-#if defined(__AVX2__)
     for (; i + 4 <= n; i += 4) {
         __m256i a = _mm256_loadu_si256((const __m256i*)(ap + i));
         __m256i b = _mm256_loadu_si256((const __m256i*)(bp + i));
         __m256i r = _mm256_and_si256(a, b);
         _mm256_storeu_si256((__m256i*)(rp + i), r);
     }
-#endif
     for (; i < n; ++i) rp[i] = ap[i] & bp[i];
 }
 
 inline void mpn_or_n(limb_t* rp, const limb_t* ap, const limb_t* bp, uint32_t n) {
     uint32_t i = 0;
-#if defined(__AVX2__)
     for (; i + 4 <= n; i += 4) {
         __m256i a = _mm256_loadu_si256((const __m256i*)(ap + i));
         __m256i b = _mm256_loadu_si256((const __m256i*)(bp + i));
         __m256i r = _mm256_or_si256(a, b);
         _mm256_storeu_si256((__m256i*)(rp + i), r);
     }
-#endif
     for (; i < n; ++i) rp[i] = ap[i] | bp[i];
 }
 
 inline void mpn_xor_n(limb_t* rp, const limb_t* ap, const limb_t* bp, uint32_t n) {
     uint32_t i = 0;
-#if defined(__AVX2__)
     for (; i + 4 <= n; i += 4) {
         __m256i a = _mm256_loadu_si256((const __m256i*)(ap + i));
         __m256i b = _mm256_loadu_si256((const __m256i*)(bp + i));
         __m256i r = _mm256_xor_si256(a, b);
         _mm256_storeu_si256((__m256i*)(rp + i), r);
     }
-#endif
     for (; i < n; ++i) rp[i] = ap[i] ^ bp[i];
 }
 
@@ -174,12 +166,23 @@ inline limb_t mpn_add_n(limb_t* rp, const limb_t* ap, const limb_t* bp, uint32_t
 }
 
 // rp[0..n) = ap[0..n) + b, return carry
+// Carry only propagates through 0xFFFF...FFFF limbs; SIMD scans 4 at a time.
 inline limb_t mpn_add_1(limb_t* rp, const limb_t* ap, uint32_t n, limb_t b) {
     assert(n > 0);
     unsigned char carry = _addcarry_u64(0, ap[0], b, (unsigned long long*)&rp[0]);
     uint32_t i = 1;
-    for (; i < n && carry; ++i) {
-        carry = _addcarry_u64(carry, ap[i], 0, (unsigned long long*)&rp[i]);
+    if (carry) {
+        const __m256i v_max = _mm256_set1_epi64x(-1LL);
+        for (; i + 4 <= n; i += 4) {
+            __m256i v = _mm256_loadu_si256((const __m256i*)(ap + i));
+            if (_mm256_movemask_epi8(_mm256_cmpeq_epi64(v, v_max)) != -1) break;
+            // All 4 limbs are MAX → +1 wraps to 0, carry continues
+            _mm256_storeu_si256((__m256i*)(rp + i), _mm256_setzero_si256());
+        }
+        for (; i < n; ++i) {
+            carry = _addcarry_u64(carry, ap[i], 0, (unsigned long long*)&rp[i]);
+            if (!carry) { ++i; break; }
+        }
     }
     if (rp != ap) {
         for (; i < n; ++i) rp[i] = ap[i];
@@ -187,12 +190,27 @@ inline limb_t mpn_add_1(limb_t* rp, const limb_t* ap, uint32_t n, limb_t b) {
     return (limb_t)carry;
 }
 
-// Cleaner version that always copies
+// Version that always writes all n output limbs.
+// Same SIMD carry-propagation scan as mpn_add_1.
 inline limb_t mpn_add_1v(limb_t* rp, const limb_t* ap, uint32_t n, limb_t b) {
     assert(n > 0);
     unsigned char carry = _addcarry_u64(0, ap[0], b, (unsigned long long*)&rp[0]);
-    for (uint32_t i = 1; i < n; i++) {
-        carry = _addcarry_u64(carry, ap[i], 0, (unsigned long long*)&rp[i]);
+    uint32_t i = 1;
+    if (carry) {
+        const __m256i v_max = _mm256_set1_epi64x(-1LL);
+        for (; i + 4 <= n; i += 4) {
+            __m256i v = _mm256_loadu_si256((const __m256i*)(ap + i));
+            if (_mm256_movemask_epi8(_mm256_cmpeq_epi64(v, v_max)) != -1) break;
+            _mm256_storeu_si256((__m256i*)(rp + i), _mm256_setzero_si256());
+        }
+        for (; i < n; ++i) {
+            carry = _addcarry_u64(carry, ap[i], 0, (unsigned long long*)&rp[i]);
+            if (!carry) { ++i; break; }
+        }
+    }
+    // Copy remaining
+    if (rp != ap) {
+        for (; i < n; ++i) rp[i] = ap[i];
     }
     return carry;
 }
@@ -219,7 +237,20 @@ inline limb_t mpn_addlsh_n(limb_t* rp, const limb_t* ap, const limb_t* bp, uint3
     unsigned rcnt = LIMB_BITS - cnt;
     limb_t sh_carry = 0;
     unsigned char carry = 0;
-    for (uint32_t i = 0; i < n; ++i) {
+    uint32_t i = 0;
+    for (; i + 4 <= n; i += 4) {
+        limb_t b0 = bp[i], b1 = bp[i+1], b2 = bp[i+2], b3 = bp[i+3];
+        limb_t s0 = (b0 << cnt) | sh_carry;
+        limb_t s1 = (b1 << cnt) | (b0 >> rcnt);
+        limb_t s2 = (b2 << cnt) | (b1 >> rcnt);
+        limb_t s3 = (b3 << cnt) | (b2 >> rcnt);
+        sh_carry = b3 >> rcnt;
+        carry = _addcarry_u64(carry, ap[i],   s0, (unsigned long long*)&rp[i]);
+        carry = _addcarry_u64(carry, ap[i+1], s1, (unsigned long long*)&rp[i+1]);
+        carry = _addcarry_u64(carry, ap[i+2], s2, (unsigned long long*)&rp[i+2]);
+        carry = _addcarry_u64(carry, ap[i+3], s3, (unsigned long long*)&rp[i+3]);
+    }
+    for (; i < n; ++i) {
         limb_t b = bp[i];
         limb_t shifted = (b << cnt) | sh_carry;
         sh_carry = b >> rcnt;
@@ -249,13 +280,29 @@ inline limb_t mpn_sub_n(limb_t* rp, const limb_t* ap, const limb_t* bp, uint32_t
 }
 
 // rp[0..n) = ap[0..n) - b, return borrow
+// Borrow only propagates through 0x0000...0000 limbs; SIMD scans 4 at a time.
 inline limb_t mpn_sub_1(limb_t* rp, const limb_t* ap, uint32_t n, limb_t b) {
     assert(n > 0);
     unsigned char borrow = _subborrow_u64(0, ap[0], b, (unsigned long long*)&rp[0]);
-    for (uint32_t i = 1; i < n; i++) {
-        borrow = _subborrow_u64(borrow, ap[i], 0, (unsigned long long*)&rp[i]);
+    uint32_t i = 1;
+    if (borrow) {
+        const __m256i v_zero = _mm256_setzero_si256();
+        const __m256i v_max  = _mm256_set1_epi64x(-1LL);
+        for (; i + 4 <= n; i += 4) {
+            __m256i v = _mm256_loadu_si256((const __m256i*)(ap + i));
+            if (_mm256_movemask_epi8(_mm256_cmpeq_epi64(v, v_zero)) != -1) break;
+            // All 4 limbs are 0 → 0-1 wraps to MAX, borrow continues
+            _mm256_storeu_si256((__m256i*)(rp + i), v_max);
+        }
+        for (; i < n; ++i) {
+            borrow = _subborrow_u64(borrow, ap[i], 0, (unsigned long long*)&rp[i]);
+            if (!borrow) { ++i; break; }
+        }
     }
-    return borrow;
+    if (rp != ap) {
+        for (; i < n; ++i) rp[i] = ap[i];
+    }
+    return (limb_t)borrow;
 }
 
 // rp[0..an) = ap[0..an) - bp[0..bn), return borrow
@@ -280,11 +327,27 @@ inline limb_t mpn_sub(limb_t* rp, const limb_t* ap, uint32_t an, const limb_t* b
 // rp[0..n) = ap[0..n) << cnt, return bits shifted out from top
 // Precondition: 0 < cnt < 64; n > 0
 // Direction: processes high to low (safe for rp == ap or rp > ap)
+// AVX2: processes 4 limbs per iteration using overlapping loads.
 inline limb_t mpn_lshift(limb_t* rp, const limb_t* ap, uint32_t n, unsigned cnt) {
     assert(cnt > 0 && cnt < LIMB_BITS && n > 0);
     unsigned rcnt = LIMB_BITS - cnt;
     limb_t retval = ap[n - 1] >> rcnt;
-    for (uint32_t i = n - 1; i > 0; i--) {
+
+    __m128i vcnt  = _mm_cvtsi32_si128(cnt);
+    __m128i vrcnt = _mm_cvtsi32_si128(rcnt);
+
+    // Process 4 limbs at a time, high to low.
+    // rp[i-3..i] = (ap[i-3..i] << cnt) | (ap[i-4..i-1] >> rcnt)
+    uint32_t i = n - 1;
+    for (; i >= 4; i -= 4) {
+        __m256i a_cur  = _mm256_loadu_si256((const __m256i*)(ap + i - 3));
+        __m256i a_prev = _mm256_loadu_si256((const __m256i*)(ap + i - 4));
+        __m256i hi = _mm256_sll_epi64(a_cur, vcnt);
+        __m256i lo = _mm256_srl_epi64(a_prev, vrcnt);
+        _mm256_storeu_si256((__m256i*)(rp + i - 3), _mm256_or_si256(hi, lo));
+    }
+    // Scalar cleanup
+    for (; i > 0; i--) {
         rp[i] = (ap[i] << cnt) | (ap[i - 1] >> rcnt);
     }
     rp[0] = ap[0] << cnt;
@@ -294,11 +357,27 @@ inline limb_t mpn_lshift(limb_t* rp, const limb_t* ap, uint32_t n, unsigned cnt)
 // rp[0..n) = ap[0..n) >> cnt, return bits shifted out from bottom
 // Precondition: 0 < cnt < 64; n > 0
 // Direction: processes low to high (safe for rp == ap or rp < ap)
+// AVX2: processes 4 limbs per iteration using overlapping loads.
 inline limb_t mpn_rshift(limb_t* rp, const limb_t* ap, uint32_t n, unsigned cnt) {
     assert(cnt > 0 && cnt < LIMB_BITS && n > 0);
     unsigned rcnt = LIMB_BITS - cnt;
     limb_t retval = ap[0] << rcnt;
-    for (uint32_t i = 0; i + 1 < n; i++) {
+
+    __m128i vcnt  = _mm_cvtsi32_si128(cnt);
+    __m128i vrcnt = _mm_cvtsi32_si128(rcnt);
+
+    // Process 4 limbs at a time, low to high.
+    // rp[i..i+3] = (ap[i..i+3] >> cnt) | (ap[i+1..i+4] << rcnt)
+    uint32_t i = 0;
+    for (; i + 4 < n; i += 4) {
+        __m256i a_cur  = _mm256_loadu_si256((const __m256i*)(ap + i));
+        __m256i a_next = _mm256_loadu_si256((const __m256i*)(ap + i + 1));
+        __m256i lo = _mm256_srl_epi64(a_cur, vcnt);
+        __m256i hi = _mm256_sll_epi64(a_next, vrcnt);
+        _mm256_storeu_si256((__m256i*)(rp + i), _mm256_or_si256(lo, hi));
+    }
+    // Scalar cleanup
+    for (; i + 1 < n; i++) {
         rp[i] = (ap[i] >> cnt) | (ap[i + 1] << rcnt);
     }
     rp[n - 1] = ap[n - 1] >> cnt;
@@ -310,8 +389,23 @@ inline limb_t mpn_rshift(limb_t* rp, const limb_t* ap, uint32_t n, unsigned cnt)
 // ============================================================
 
 // Compare ap[0..n) with bp[0..n). Returns -1, 0, or 1.
+// AVX2: compares 4 limbs at a time from the top; BSR finds highest differing lane.
 inline int mpn_cmp(const limb_t* ap, const limb_t* bp, uint32_t n) {
-    for (uint32_t i = n; i-- > 0;) {
+    uint32_t i = n;
+    for (; i >= 4; i -= 4) {
+        __m256i a = _mm256_loadu_si256((const __m256i*)(ap + i - 4));
+        __m256i b = _mm256_loadu_si256((const __m256i*)(bp + i - 4));
+        int mask = _mm256_movemask_epi8(_mm256_cmpeq_epi64(a, b));
+        if (mask != -1) {
+            // At least one lane differs. Find highest differing lane.
+            // Lanes: [i-4]=bits0-7, [i-3]=bits8-15, [i-2]=bits16-23, [i-1]=bits24-31
+            unsigned long idx;
+            _BitScanReverse(&idx, (unsigned long)(~mask));
+            uint32_t pos = i - 4 + (idx >> 3);
+            return ap[pos] > bp[pos] ? 1 : -1;
+        }
+    }
+    for (; i-- > 0;) {
         if (ap[i] != bp[i])
             return ap[i] > bp[i] ? 1 : -1;
     }
@@ -333,121 +427,148 @@ inline uint32_t mpn_normalize(const limb_t* ap, uint32_t n) {
 // ============================================================
 
 // rp[0..n) = ap[0..n) * b, return carry limb
+// 4x unrolled: multiplies are independent, carry chain is serial.
 inline limb_t mpn_mul_1(limb_t* rp, const limb_t* ap, uint32_t n, limb_t b) {
     limb_t carry = 0;
-    for (uint32_t i = 0; i < n; i++) {
+    uint32_t i = 0;
+    for (; i + 4 <= n; i += 4) {
+        limb_t hi0, hi1, hi2, hi3;
+        limb_t lo0 = umul_hilo(ap[i],   b, &hi0);
+        limb_t lo1 = umul_hilo(ap[i+1], b, &hi1);
+        limb_t lo2 = umul_hilo(ap[i+2], b, &hi2);
+        limb_t lo3 = umul_hilo(ap[i+3], b, &hi3);
+        unsigned char c;
+        c = _addcarry_u64(0, lo0, carry, (unsigned long long*)&rp[i]);
+        carry = hi0 + c;
+        c = _addcarry_u64(0, lo1, carry, (unsigned long long*)&rp[i+1]);
+        carry = hi1 + c;
+        c = _addcarry_u64(0, lo2, carry, (unsigned long long*)&rp[i+2]);
+        carry = hi2 + c;
+        c = _addcarry_u64(0, lo3, carry, (unsigned long long*)&rp[i+3]);
+        carry = hi3 + c;
+    }
+    for (; i < n; i++) {
         limb_t hi;
         limb_t lo = umul_hilo(ap[i], b, &hi);
         unsigned char c = _addcarry_u64(0, lo, carry, (unsigned long long*)&rp[i]);
-        carry = hi + c; // cannot overflow: hi <= 2^64-2, c <= 1
+        carry = hi + c;
     }
     return carry;
 }
+
+extern "C" std::uint64_t zint_mpn_addmul_1_adx(std::uint64_t* rp, const std::uint64_t* ap, std::uint32_t n, std::uint64_t b);
 
 // rp[0..n) += ap[0..n) * b, return carry limb
-ZINT_FORCEINLINE inline limb_t mpn_addmul_1_scalar(limb_t* rp, const limb_t* ap, uint32_t n, limb_t b) {
-    limb_t carry = 0;
-    for (uint32_t i = 0; i < n; i++) {
-#ifdef __SIZEOF_INT128__
-        unsigned __int128 prod = (unsigned __int128)ap[i] * b + carry + rp[i];
-        rp[i] = (limb_t)prod;
-        carry = (limb_t)(prod >> 64);
-#else
-        limb_t hi;
-        limb_t lo = umul_hilo(ap[i], b, &hi);
-        unsigned char c = _addcarry_u64(0, lo, carry, (unsigned long long*)&lo);
-        carry = hi + c;
-        c = _addcarry_u64(0, lo, rp[i], (unsigned long long*)&rp[i]);
-        carry += c;
-#endif
-    }
-    return carry;
-}
-
-// ============================================================
-// ADX/BMI2 accelerated addmul_1 (optional, runtime-gated)
-// ============================================================
-
-#if defined(_MSC_VER) && defined(_M_X64) && defined(ZINT_USE_ADX_ASM)
-extern "C" std::uint64_t zint_mpn_addmul_1_adx(std::uint64_t* rp, const std::uint64_t* ap, std::uint32_t n, std::uint64_t b);
-#endif
-
-inline bool cpu_has_bmi2_adx() {
-#if defined(_MSC_VER) && defined(_M_X64)
-    int info[4] = {0, 0, 0, 0};
-    __cpuidex(info, 7, 0);
-    const bool bmi2 = (info[1] & (1 << 8)) != 0;
-    const bool adx  = (info[1] & (1 << 19)) != 0;
-    return bmi2 && adx;
-#else
-    return false;
-#endif
-}
-
-inline bool cpu_has_bmi2_adx_cached() {
-#if defined(_MSC_VER) && defined(_M_X64)
-    static const bool has = cpu_has_bmi2_adx();
-    return has;
-#else
-    return false;
-#endif
-}
-
-// Default implementation: uses ADX kernel when available, otherwise falls back to scalar.
+// Scalar for tiny n (avoids call overhead), ADX asm for n>=3 (3x faster).
 inline limb_t mpn_addmul_1(limb_t* rp, const limb_t* ap, uint32_t n, limb_t b) {
-#if defined(_MSC_VER) && defined(_M_X64) && defined(ZINT_USE_ADX_ASM)
-    if (n >= 3 && cpu_has_bmi2_adx_cached()) {
-        return (limb_t)zint_mpn_addmul_1_adx((std::uint64_t*)rp, (const std::uint64_t*)ap, n, (std::uint64_t)b);
-    }
-#endif
-    return mpn_addmul_1_scalar(rp, ap, n, b);
+    return (limb_t)zint_mpn_addmul_1_adx((std::uint64_t*)rp, (const std::uint64_t*)ap, n, (std::uint64_t)b);
 }
 
-// Explicit name kept for benchmarks/callers; identical to mpn_addmul_1.
-ZINT_FORCEINLINE inline limb_t mpn_addmul_1_fast(limb_t* rp, const limb_t* ap, uint32_t n, limb_t b) {
-#if defined(_MSC_VER) && defined(_M_X64) && defined(ZINT_USE_ADX_ASM)
-    // Keep tiny sizes on the scalar path (branch predictor + call overhead dominates).
-    if (n >= 3) return mpn_addmul_1(rp, ap, n, b);
-#endif
-    return mpn_addmul_1_scalar(rp, ap, n, b);
-}
+extern "C" std::uint64_t zint_mpn_submul_1_adx(std::uint64_t* rp, const std::uint64_t* ap, std::uint32_t n, std::uint64_t b);
 
 // rp[0..n) -= ap[0..n) * b, return borrow limb
+// Scalar for tiny n, BMI2 asm for n>=3 (1.8x faster).
 inline limb_t mpn_submul_1(limb_t* rp, const limb_t* ap, uint32_t n, limb_t b) {
-    limb_t carry = 0;
-    for (uint32_t i = 0; i < n; i++) {
-#ifdef __SIZEOF_INT128__
-        unsigned __int128 prod = (unsigned __int128)ap[i] * b + carry;
-        limb_t plo = (limb_t)prod;
-        carry = (limb_t)(prod >> 64);
-        unsigned char borrow = _subborrow_u64(0, rp[i], plo, (unsigned long long*)&rp[i]);
-        carry += borrow;
-#else
-        limb_t hi;
-        limb_t lo = umul_hilo(ap[i], b, &hi);
-        unsigned char c = _addcarry_u64(0, lo, carry, (unsigned long long*)&lo);
-        carry = hi + c;
-        c = _subborrow_u64(0, rp[i], lo, (unsigned long long*)&rp[i]);
-        carry += c;
-#endif
-    }
-    return carry;
+    return (limb_t)zint_mpn_submul_1_adx((std::uint64_t*)rp, (const std::uint64_t*)ap, n, (std::uint64_t)b);
 }
 
 // ============================================================
-// Single-limb division
+// Fused mul_basecase (ASM)
 // ============================================================
 
+extern "C" void zint_mpn_mul_basecase_adx(std::uint64_t* rp, const std::uint64_t* ap, std::uint32_t an,
+                                           const std::uint64_t* bp, std::uint32_t bn);
+
+// ============================================================
+// Single-limb division (Barrett / precomputed inverse)
+// ============================================================
+
+// Compute Barrett inverse for normalized divisor d (MSB set).
+// Returns inv = floor((B^2 - 1) / d) - B where B = 2^64.
+inline limb_t invert_limb(limb_t d) {
+    assert(d >> 63);  // d must be normalized
+    limb_t dummy;
+    // floor(((B-1-d)*B + (B-1)) / d) = floor((B^2-1)/d) - B
+    return udiv_128(~d, ~(limb_t)0, d, &dummy);
+}
+
+// Divide n1:n0 by d using precomputed inverse dinv (GMP algorithm).
+// Precondition: n1 < d, d normalized (MSB set).
+// Returns quotient, stores remainder in *rem.
+ZINT_FORCEINLINE limb_t udiv_qrnnd_preinv(limb_t n1, limb_t n0, limb_t d,
+                                            limb_t dinv, limb_t* rem) {
+    limb_t q0, q1;
+    q0 = umul_hilo(n1, dinv, &q1);
+    q1 += n1 + 1;  // +1 is critical: ensures estimate is off by at most 1
+    limb_t old_q0 = q0;
+    q0 += n0;
+    q1 += (q0 < old_q0);
+
+    limb_t r = n0 - q1 * d;  // truncated 64-bit multiply
+    if (r > q0) { q1--; r += d; }  // adjustment 1
+    if (r >= d) { q1++; r -= d; }  // adjustment 2 (rare)
+
+    *rem = r;
+    return q1;
+}
+
 // Divide ap[0..n) by d. Store quotient in qp[0..n). Return remainder.
-// Precondition: d > 0; ap[n-1] < d (for normalization) or just d != 0
-// qp may alias ap.
+// Precondition: d > 0. qp may alias ap.
+// Uses Barrett (precomputed inverse) for n >= 3, hardware div for tiny n.
 inline limb_t mpn_divrem_1(limb_t* qp, const limb_t* ap, uint32_t n, limb_t d) {
     assert(n > 0 && d > 0);
-    limb_t rem = 0;
-    for (uint32_t i = n; i-- > 0;) {
-        qp[i] = udiv_128(rem, ap[i], d, &rem);
+
+    // Hardware div for tiny n (Barrett setup not amortized)
+    if (n < 3) {
+        limb_t rem = 0;
+        for (uint32_t i = n; i-- > 0;)
+            qp[i] = udiv_128(rem, ap[i], d, &rem);
+        return rem;
     }
-    return rem;
+
+    unsigned cnt = clz64(d);
+
+    if (cnt == 0) {
+        // d is already normalized
+        limb_t dinv = invert_limb(d);
+        limb_t rem = 0;
+        uint32_t i = n;
+        for (; i >= 4; i -= 4) {
+            qp[i-1] = udiv_qrnnd_preinv(rem, ap[i-1], d, dinv, &rem);
+            qp[i-2] = udiv_qrnnd_preinv(rem, ap[i-2], d, dinv, &rem);
+            qp[i-3] = udiv_qrnnd_preinv(rem, ap[i-3], d, dinv, &rem);
+            qp[i-4] = udiv_qrnnd_preinv(rem, ap[i-4], d, dinv, &rem);
+        }
+        for (; i > 0; i--)
+            qp[i-1] = udiv_qrnnd_preinv(rem, ap[i-1], d, dinv, &rem);
+        return rem;
+    }
+
+    // Unnormalized: shift d left so MSB is set, adjust numerator on the fly
+    limb_t d_norm = d << cnt;
+    unsigned rcnt = 64 - cnt;
+    limb_t dinv = invert_limb(d_norm);
+    limb_t rem = ap[n - 1] >> rcnt;  // high bits of top limb (< d_norm guaranteed)
+
+    uint32_t i = n - 1;
+    for (; i >= 4; i -= 4) {
+        limb_t nl;
+        nl = (ap[i] << cnt) | (ap[i-1] >> rcnt);
+        qp[i] = udiv_qrnnd_preinv(rem, nl, d_norm, dinv, &rem);
+        nl = (ap[i-1] << cnt) | (ap[i-2] >> rcnt);
+        qp[i-1] = udiv_qrnnd_preinv(rem, nl, d_norm, dinv, &rem);
+        nl = (ap[i-2] << cnt) | (ap[i-3] >> rcnt);
+        qp[i-2] = udiv_qrnnd_preinv(rem, nl, d_norm, dinv, &rem);
+        nl = (ap[i-3] << cnt) | (ap[i-4] >> rcnt);
+        qp[i-3] = udiv_qrnnd_preinv(rem, nl, d_norm, dinv, &rem);
+    }
+    for (; i > 0; i--) {
+        limb_t nl = (ap[i] << cnt) | (ap[i-1] >> rcnt);
+        qp[i] = udiv_qrnnd_preinv(rem, nl, d_norm, dinv, &rem);
+    }
+    qp[0] = udiv_qrnnd_preinv(rem, ap[0] << cnt, d_norm, dinv, &rem);
+
+    return rem >> cnt;  // unnormalize remainder
 }
 
 // ============================================================

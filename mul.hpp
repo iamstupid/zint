@@ -6,6 +6,7 @@
 
 #include "mpn.hpp"
 #include "scratch.hpp"
+#include "tuning.hpp"
 #include <cstring>
 #include <algorithm>
 
@@ -15,124 +16,21 @@
 namespace zint {
 
 // ============================================================
-// Tuning thresholds (determined by benchmarking)
+// Basecase multiplication (fused ASM schoolbook)
 // ============================================================
-
-// Below this, use schoolbook basecase
-static constexpr uint32_t KARATSUBA_THRESHOLD = 32;
-
-// Below this, use Karatsuba; above, use NTT
-static constexpr uint32_t NTT_THRESHOLD = 1024;
-
-// For squaring, thresholds can be different (squaring is ~1.5x faster)
-static constexpr uint32_t SQR_KARATSUBA_THRESHOLD = 40;
-static constexpr uint32_t SQR_NTT_THRESHOLD = 1024;
-
-// ============================================================
-// Basecase multiplication (schoolbook)
-// ============================================================
-
-// Comba multiplication for balanced small n: rp[0..2n) = ap[0..n) * bp[0..n)
-// Uses a 192-bit accumulator (acc0/acc1/acc2).
-ZINT_NOINLINE inline void mpn_mul_basecase_comba_n(limb_t* rp, const limb_t* ap, const limb_t* bp, uint32_t n) {
-    assert(n > 0);
-
-    limb_t acc0 = 0;
-    limb_t acc1 = 0;
-    limb_t acc2 = 0;
-
-    for (uint32_t k = 0; k < 2 * n; ++k) {
-        uint32_t i0 = (k >= (n - 1)) ? (k - (n - 1)) : 0;
-        uint32_t i1 = (k < (n - 1)) ? k : (n - 1);
-
-        for (uint32_t i = i0; i <= i1; ++i) {
-            uint32_t j = k - i;
-            limb_t hi;
-            limb_t lo = umul_hilo(ap[i], bp[j], &hi);
-
-            unsigned char c = _addcarry_u64(0, acc0, lo, (unsigned long long*)&acc0);
-            c = _addcarry_u64(c, acc1, hi, (unsigned long long*)&acc1);
-            acc2 += (limb_t)c;
-        }
-
-        rp[k] = acc0;
-        acc0 = acc1;
-        acc1 = acc2;
-        acc2 = 0;
-    }
-}
-
-ZINT_NOINLINE inline void mpn_mul_basecase_classic(limb_t* rp, const limb_t* ap, uint32_t an,
-                                                   const limb_t* bp, uint32_t bn)
-{
-    // First row: rp = ap * bp[0]
-    rp[an] = mpn_mul_1(rp, ap, an, bp[0]);
-
-    // Remaining rows: rp += ap * bp[j], shifted by j
-    for (uint32_t j = 1; j < bn; j++) {
-        rp[j + an] = mpn_addmul_1(rp + j, ap, an, bp[j]);
-    }
-}
 
 // rp[0..an+bn) = ap[0..an) * bp[0..bn)
 // Precondition: an >= bn > 0; rp does NOT alias ap or bp
-inline void mpn_mul_basecase(limb_t* rp, const limb_t* ap, uint32_t an,
-                              const limb_t* bp, uint32_t bn)
+ZINT_NOINLINE inline void mpn_mul_basecase(limb_t* rp, const limb_t* ap, uint32_t an,
+                                            const limb_t* bp, uint32_t bn)
 {
-    if (an == bn && bn >= 6 && bn <= 16) {
-        mpn_mul_basecase_comba_n(rp, ap, bp, bn);
-        return;
-    }
-
-    mpn_mul_basecase_classic(rp, ap, an, bp, bn);
+    zint_mpn_mul_basecase_adx((std::uint64_t*)rp, (const std::uint64_t*)ap, an,
+                               (const std::uint64_t*)bp, bn);
 }
 
 // ============================================================
 // Basecase squaring (exploits symmetry)
 // ============================================================
-
-// Comba squaring for small n: rp[0..2n) = ap[0..n)^2
-// Uses symmetry and a 192-bit accumulator (acc0/acc1/acc2).
-ZINT_NOINLINE inline void mpn_sqr_basecase_comba_n(limb_t* rp, const limb_t* ap, uint32_t n) {
-    assert(n > 0);
-
-    limb_t acc0 = 0;
-    limb_t acc1 = 0;
-    limb_t acc2 = 0;
-
-    for (uint32_t k = 0; k < 2 * n; ++k) {
-        uint32_t i0 = (k >= (n - 1)) ? (k - (n - 1)) : 0;
-        uint32_t i1 = (k < (n - 1)) ? k : (n - 1);
-
-        for (uint32_t i = i0; i <= i1; ++i) {
-            uint32_t j = k - i;
-            if (i > j) break;
-
-            limb_t hi;
-            limb_t lo = umul_hilo(ap[i], ap[j], &hi);
-
-            if (i < j) {
-                limb_t extra = hi >> 63;
-                limb_t lo2 = lo << 1;
-                limb_t hi2 = (hi << 1) | (lo >> 63);
-
-                unsigned char c = _addcarry_u64(0, acc0, lo2, (unsigned long long*)&acc0);
-                c = _addcarry_u64(c, acc1, hi2, (unsigned long long*)&acc1);
-                acc2 += (limb_t)c;
-                acc2 += extra;
-            } else {
-                unsigned char c = _addcarry_u64(0, acc0, lo, (unsigned long long*)&acc0);
-                c = _addcarry_u64(c, acc1, hi, (unsigned long long*)&acc1);
-                acc2 += (limb_t)c;
-            }
-        }
-
-        rp[k] = acc0;
-        acc0 = acc1;
-        acc1 = acc2;
-        acc2 = 0;
-    }
-}
 
 // rp[0..2*n) = ap[0..n)^2
 // Uses the identity: a^2 = sum_i(a[i]^2 * B^(2i)) + 2*sum_{i<j}(a[i]*a[j]*B^(i+j))
@@ -155,17 +53,20 @@ inline void mpn_sqr_basecase(limb_t* rp, const limb_t* ap, uint32_t n) {
     }
     rp[2 * n - 1] = 0;
 
-    // Double the off-diagonal part (left shift by 1 bit)
-    limb_t carry = mpn_lshift(rp + 1, rp + 1, 2 * n - 2, 1);
-    rp[2 * n - 1] = carry;
-
-    // Add diagonal: rp[2*i..2*i+1] += ap[i]^2
-    unsigned char c = 0;
+    // Fused: double off-diagonal (lshift by 1) + add diagonal (ap[i]^2)
+    // in a single pass, saving one full traversal of 2n-2 limbs.
+    limb_t shift_carry = 0;
+    unsigned char add_carry = 0;
     for (uint32_t i = 0; i < n; i++) {
+        limb_t r0 = rp[2 * i];
+        limb_t r1 = rp[2 * i + 1];
+        limb_t d0 = (r0 << 1) | shift_carry;
+        limb_t d1 = (r1 << 1) | (r0 >> 63);
+        shift_carry = r1 >> 63;
         limb_t hi, lo;
         lo = umul_hilo(ap[i], ap[i], &hi);
-        c = _addcarry_u64(c, rp[2 * i], lo, (unsigned long long*)&rp[2 * i]);
-        c = _addcarry_u64(c, rp[2 * i + 1], hi, (unsigned long long*)&rp[2 * i + 1]);
+        add_carry = _addcarry_u64(add_carry, d0, lo, (unsigned long long*)&rp[2 * i]);
+        add_carry = _addcarry_u64(add_carry, d1, hi, (unsigned long long*)&rp[2 * i + 1]);
     }
 }
 
@@ -178,7 +79,7 @@ inline void mpn_sqr_basecase(limb_t* rp, const limb_t* ap, uint32_t n) {
 
 // Internal Karatsuba: rp[0..2*n) = ap[0..n) * bp[0..n)
 // scratch must have at least 4*n limbs available
-static void mpn_mul_karatsuba_n(limb_t* rp, const limb_t* ap, const limb_t* bp,
+inline void mpn_mul_karatsuba_n(limb_t* rp, const limb_t* ap, const limb_t* bp,
                                  uint32_t n, limb_t* scratch)
 {
     if (n < KARATSUBA_THRESHOLD) {
@@ -187,9 +88,8 @@ static void mpn_mul_karatsuba_n(limb_t* rp, const limb_t* ap, const limb_t* bp,
     }
 
     uint32_t m = n / 2;        // low half size
-    uint32_t h = n - m;        // high half size (h >= m)
+    uint32_t h = n - m;        // high half size (h >= m, h == m+1 when n odd)
 
-    // Split: a = a1*B^m + a0,  b = b1*B^m + b0
     const limb_t* a0 = ap;
     const limb_t* a1 = ap + m;
     const limb_t* b0 = bp;
@@ -199,124 +99,101 @@ static void mpn_mul_karatsuba_n(limb_t* rp, const limb_t* ap, const limb_t* bp,
     mpn_mul_karatsuba_n(rp, a0, b0, m, scratch);
 
     // Step 2: z2 = a1 * b1 (stored in rp[2m..2n))
-    if (h == m) {
-        mpn_mul_karatsuba_n(rp + 2 * m, a1, b1, h, scratch);
-    } else {
-        // h = m+1 when n is odd; use basecase or recurse
-        if (h < KARATSUBA_THRESHOLD) {
-            mpn_mul_basecase(rp + 2 * m, a1, h, b1, h);
-        } else {
-            mpn_mul_karatsuba_n(rp + 2 * m, a1, b1, h, scratch);
-        }
-    }
+    mpn_mul_karatsuba_n(rp + 2 * m, a1, b1, h, scratch);
 
     // Step 3: Compute |a0 - a1| and |b0 - b1|, track signs
-    // t0 = |a0 - a1| in scratch[0..h)
-    // t1 = |b0 - b1| in scratch[h..2h)
     limb_t* t0 = scratch;
     limb_t* t1 = scratch + h;
-    limb_t* t2 = scratch + 2 * h; // scratch for recursive mul: at least 2h limbs
+    limb_t* t2 = scratch + 2 * h;
 
-    int sign_a, sign_b;
+    bool neg_a, neg_b;
 
-    // Compare a0 (m limbs) vs a1 (h limbs)
+    // t0 = |a0 - a1| (h limbs)
     if (h > m) {
-        // a1 has one more limb; if top limb nonzero, a1 > a0
         if (a1[m] != 0) {
-            sign_a = -1; // a0 < a1
+            neg_a = true;
         } else {
-            int cmp = mpn_cmp(a0, a1, m);
-            sign_a = cmp;
+            neg_a = (mpn_cmp(a0, a1, m) < 0);
         }
     } else {
-        sign_a = mpn_cmp(a0, a1, m);
+        neg_a = (mpn_cmp(a0, a1, m) < 0);
     }
 
-    if (sign_a >= 0) {
-        // a0 >= a1: t0 = a0 - a1
-        mpn_zero(t0, h);
-        mpn_copyi(t0, a0, m);
-        mpn_sub(t0, t0, h, a1, h);
+    if (!neg_a) {
+        if (h == m) {
+            mpn_sub_n(t0, a0, a1, m);
+        } else {
+            limb_t borrow = mpn_sub_n(t0, a0, a1, m);
+            t0[m] = 0 - a1[m] - borrow;
+        }
     } else {
-        // a0 < a1: t0 = a1 - a0
-        mpn_copyi(t0, a1, h);
-        mpn_sub(t0, t0, h, a0, m);
+        if (h == m) {
+            mpn_sub_n(t0, a1, a0, m);
+        } else {
+            mpn_copyi(t0, a1, h);
+            mpn_sub(t0, t0, h, a0, m);
+        }
     }
 
-    // Same for b
+    // t1 = |b0 - b1| (h limbs)
     if (h > m) {
         if (b1[m] != 0) {
-            sign_b = -1;
+            neg_b = true;
         } else {
-            int cmp = mpn_cmp(b0, b1, m);
-            sign_b = cmp;
+            neg_b = (mpn_cmp(b0, b1, m) < 0);
         }
     } else {
-        sign_b = mpn_cmp(b0, b1, m);
+        neg_b = (mpn_cmp(b0, b1, m) < 0);
     }
 
-    if (sign_b >= 0) {
-        mpn_zero(t1, h);
-        mpn_copyi(t1, b0, m);
-        mpn_sub(t1, t1, h, b1, h);
+    if (!neg_b) {
+        if (h == m) {
+            mpn_sub_n(t1, b0, b1, m);
+        } else {
+            limb_t borrow = mpn_sub_n(t1, b0, b1, m);
+            t1[m] = 0 - b1[m] - borrow;
+        }
     } else {
-        mpn_copyi(t1, b1, h);
-        mpn_sub(t1, t1, h, b0, m);
+        if (h == m) {
+            mpn_sub_n(t1, b1, b0, m);
+        } else {
+            mpn_copyi(t1, b1, h);
+            mpn_sub(t1, t1, h, b0, m);
+        }
     }
 
     // Step 4: t2 = |a0-a1| * |b0-b1| (in t2[0..2h))
-    uint32_t t0_n = mpn_normalize(t0, h);
-    uint32_t t1_n = mpn_normalize(t1, h);
-
-    if (t0_n == 0 || t1_n == 0) {
+    // Only check for zero; otherwise multiply at full size h.
+    if ((t0[h - 1] | t0[0]) == 0 && mpn_normalize(t0, h) == 0) {
         mpn_zero(t2, 2 * h);
-    } else if (t0_n < KARATSUBA_THRESHOLD || t1_n < KARATSUBA_THRESHOLD) {
+    } else if ((t1[h - 1] | t1[0]) == 0 && mpn_normalize(t1, h) == 0) {
         mpn_zero(t2, 2 * h);
-        if (t0_n >= t1_n)
-            mpn_mul_basecase(t2, t0, t0_n, t1, t1_n);
-        else
-            mpn_mul_basecase(t2, t1, t1_n, t0, t0_n);
     } else {
-        // Pad to same size for recursive Karatsuba
-        uint32_t tn = (t0_n > t1_n) ? t0_n : t1_n;
-        mpn_zero(t0 + t0_n, tn - t0_n);
-        mpn_zero(t1 + t1_n, tn - t1_n);
-        mpn_mul_karatsuba_n(t2, t0, t1, tn, t2 + 2 * tn);
+        mpn_mul_karatsuba_n(t2, t0, t1, h, t2 + 2 * h);
     }
 
     // Step 5: Recombination
-    // z1 = z0 + z2 - (a0-a1)*(b0-b1) = z0 + z2 - sign_a * sign_b * t2
-    // If sign_a * sign_b > 0: z1 = z0 + z2 - t2
-    // If sign_a * sign_b < 0: z1 = z0 + z2 + t2
+    // z1 = z0 + z2 ± t2, where ± depends on sign:
+    //   same signs (neg_a == neg_b) → subtract t2
+    //   diff signs (neg_a != neg_b) → add t2
     //
     // rp currently: [z0 (2m limbs)] [z2 (2h limbs)]
-    // We need: rp = z0 + z1*B^m + z2*B^(2m)
-    //
-    // To avoid aliasing bugs (rp[0..2m) overlaps rp[m..] target),
-    // compute z1 entirely in scratch[0..2h), then add it to rp[m..].
-    // At this point scratch[0..2h) is free (t0/t1 no longer needed)
-    // and t2 is at scratch[2h..4h).
+    // Compute z1 in scratch[0..2h), then add to rp[m..].
+    // t2 is at scratch[2h..4h).
 
-    // z1 = z0 + z2 in scratch[0..2h), with carry in z1_hi
-    std::memcpy(scratch, rp, 2 * m * sizeof(limb_t)); // copy z0
-    if (h > m)
-        mpn_zero(scratch + 2 * m, 2 * h - 2 * m); // zero-extend z0 to 2h limbs
-    limb_t z1_hi = mpn_add_n(scratch, scratch, rp + 2 * m, 2 * h); // += z2
+    std::memcpy(scratch, rp, 2 * m * sizeof(limb_t));
+    if (h > m) { scratch[2 * m] = 0; scratch[2 * m + 1] = 0; }
+    limb_t z1_hi = mpn_add_n(scratch, scratch, rp + 2 * m, 2 * h);
 
-    // ± t2 (t2 is at scratch[2h..], non-overlapping with scratch[0..2h))
-    bool subtract_t2 = (sign_a > 0 && sign_b > 0) || (sign_a < 0 && sign_b < 0);
-    uint32_t t2_n2 = mpn_normalize(t2, 2 * h);
-    if (t2_n2 > 0) {
-        if (subtract_t2) {
-            limb_t borrow = mpn_sub(scratch, scratch, 2 * h, t2, t2_n2);
-            z1_hi -= borrow; // safe: z1 = a0*b1 + a1*b0 >= 0
-        } else {
-            limb_t c = mpn_add(scratch, scratch, 2 * h, t2, t2_n2);
-            z1_hi += c;
-        }
+    if (neg_a == neg_b) {
+        limb_t borrow = mpn_sub_n(scratch, scratch, t2, 2 * h);
+        z1_hi -= borrow;
+    } else {
+        limb_t c = mpn_add_n(scratch, scratch, t2, 2 * h);
+        z1_hi += c;
     }
 
-    // Add z1 (scratch[0..2h) + z1_hi) to rp[m..2n)
+    // Add z1 to rp[m..2n)
     limb_t carry = mpn_add(rp + m, rp + m, 2 * n - m, scratch, 2 * h);
     carry += z1_hi;
     if (carry && m + 2 * h < 2 * n) {
@@ -325,7 +202,7 @@ static void mpn_mul_karatsuba_n(limb_t* rp, const limb_t* ap, const limb_t* bp,
 }
 
 // General unbalanced Karatsuba: an >= bn
-static void mpn_mul_karatsuba(limb_t* rp, const limb_t* ap, uint32_t an,
+inline void mpn_mul_karatsuba(limb_t* rp, const limb_t* ap, uint32_t an,
                                const limb_t* bp, uint32_t bn, limb_t* scratch)
 {
     if (an == bn) {
@@ -400,17 +277,13 @@ inline void mpn_mul(limb_t* rp, const limb_t* ap, uint32_t an,
 
     if (bn < KARATSUBA_THRESHOLD) {
         mpn_mul_basecase(rp, ap, an, bp, bn);
-    } else if (an >= NTT_THRESHOLD) {
-        // Use NTT when the larger operand is NTT-sized
+    } else if (bn >= NTT_BN_MIN && (uint64_t)an * bn >= NTT_AREA) {
         mpn_mul_ntt(rp, ap, an, bp, bn);
-    } else if (bn < NTT_THRESHOLD) {
-        uint32_t mx = an > bn ? an : bn;
-        uint32_t scratch_n = 6 * mx + 128;
+    } else {
+        uint32_t scratch_n = 6 * an + 128;
         ScratchScope scope(scratch());
         limb_t* scratchp = scope.alloc<limb_t>(scratch_n, 32);
         mpn_mul_karatsuba(rp, ap, an, bp, bn, scratchp);
-    } else {
-        mpn_mul_ntt(rp, ap, an, bp, bn);
     }
 }
 

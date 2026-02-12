@@ -193,15 +193,49 @@ static void test_decimal_roundtrip_and_cache() {
 }
 
 static void test_non_decimal_roundtrip() {
-    int bases[] = {2, 3, 8, 16, 36};
+    // Test ALL bases 2-64 with small values
     zint::xoshiro256pp rng(4);
-    for (int base : bases) {
-        for (int t = 0; t < 200; ++t) {
+    for (int base = 2; base <= 64; ++base) {
+        for (int t = 0; t < 50; ++t) {
             zint::bigint a = random_bigint(rng, 64);
             std::string s = a.to_string(base);
             zint::bigint b = zint::bigint::from_string(s.c_str(), base);
             ZINT_ASSERT(b == a);
         }
+    }
+
+    // Test power-of-2 bases with known values
+    ZINT_ASSERT(zint::bigint(255LL).to_string(2) == "11111111");
+    ZINT_ASSERT(zint::bigint(255LL).to_string(16) == "FF");
+    ZINT_ASSERT(zint::bigint(255LL).to_string(8) == "377");
+    ZINT_ASSERT(zint::bigint(255LL).to_string(4) == "3333");
+    ZINT_ASSERT(zint::bigint(255LL).to_string(32) == "7V");
+    ZINT_ASSERT(zint::bigint(255LL).to_string(64) == "3/");
+    ZINT_ASSERT(zint::bigint(0LL).to_string(16) == "0");
+    ZINT_ASSERT(zint::bigint(-1LL).to_string(16) == "-1");
+
+    // Case-insensitive parsing for bases <= 36
+    ZINT_ASSERT(zint::bigint::from_string("ff", 16) == zint::bigint(255LL));
+    ZINT_ASSERT(zint::bigint::from_string("FF", 16) == zint::bigint(255LL));
+
+    // Larger sizes: test D&C path for non-base-10
+    int large_bases[] = {3, 5, 7, 10, 12, 16, 36, 64};
+    for (int base : large_bases) {
+        for (int size : {10, 50, 200, 1000}) {
+            zint::bigint a = random_bigint(rng, (u32)size);
+            std::string s = a.to_string(base);
+            zint::bigint b = zint::bigint::from_string(s.c_str(), base);
+            ZINT_ASSERT(b == a);
+        }
+    }
+
+    // Roundtrip with shared cache
+    zint::bigint::radix_powers_cache cache(16);
+    for (int t = 0; t < 100; ++t) {
+        zint::bigint a = random_bigint(rng, 128);
+        std::string s = a.to_string(16, &cache);
+        zint::bigint b = zint::bigint::from_string(s.c_str(), 16, &cache);
+        ZINT_ASSERT(b == a);
     }
 }
 
@@ -287,6 +321,20 @@ static void test_bitwise_algebra_and_mod2k() {
 static void test_mpn_addmul_1_default() {
     zint::xoshiro256pp rng(6);
 
+    // Scalar reference for cross-checking ASM addmul_1
+    auto addmul_1_ref = [](zint::limb_t* rp, const zint::limb_t* ap, u32 n, zint::limb_t b) -> zint::limb_t {
+        zint::limb_t carry = 0;
+        for (u32 i = 0; i < n; i++) {
+            zint::limb_t hi;
+            zint::limb_t lo = zint::umul_hilo(ap[i], b, &hi);
+            unsigned char c = _addcarry_u64(0, lo, carry, (unsigned long long*)&lo);
+            carry = hi + c;
+            c = _addcarry_u64(0, lo, rp[i], (unsigned long long*)&rp[i]);
+            carry += c;
+        }
+        return carry;
+    };
+
     for (int t = 0; t < 5000; ++t) {
         u32 n = (rng.next_u32() % 256) + 1;
         zint::limb_t b = (zint::limb_t)rng.next_u64();
@@ -300,7 +348,7 @@ static void test_mpn_addmul_1_default() {
         r1 = r0;
         r2 = r0;
 
-        zint::limb_t c1 = zint::mpn_addmul_1_scalar(r1.data(), a.data(), n, b);
+        zint::limb_t c1 = addmul_1_ref(r1.data(), a.data(), n, b);
         zint::limb_t c2 = zint::mpn_addmul_1(r2.data(), a.data(), n, b);
 
         ZINT_ASSERT(c1 == c2);

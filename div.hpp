@@ -13,12 +13,6 @@
 namespace zint {
 
 // ============================================================
-// Tuning thresholds
-// ============================================================
-
-static constexpr uint32_t DIV_DC_THRESHOLD = 60;  // schoolbook -> D&C/Newton
-
-// ============================================================
 // Schoolbook division (Knuth Algorithm D)
 // ============================================================
 
@@ -127,8 +121,6 @@ static void mpn_div_qr_schoolbook(limb_t* qp, limb_t* np, uint32_t nn,
 // ============================================================
 // Newton reciprocal inversion
 // ============================================================
-
-static constexpr uint32_t INVERT_THRESHOLD = 32;
 
 // Compute ip[0..dn) such that (B^dn + ip) ≈ floor(B^(2*dn) / D)
 // D = dp[0..dn) must be normalized (dp[dn-1] has MSB set).
@@ -362,6 +354,64 @@ static void mpn_div_qr_newton(limb_t* qp, limb_t* np, uint32_t nn,
     if (shift > 0) {
         mpn_rshift(np, np, dn, shift);
     }
+}
+
+// ============================================================
+// Newton division with precomputed reciprocal
+// ============================================================
+
+// Like mpn_div_qr_newton but uses a precomputed normalized divisor + reciprocal.
+// d_norm[0..dn) = dp << shift (MSB of d_norm[dn-1] must be set).
+// inv[0..dn) = Newton reciprocal of d_norm.
+// np is modified in-place; np must have nn+1 limbs allocated.
+static void mpn_div_qr_newton_preinv(limb_t* qp, limb_t* np, uint32_t nn,
+                                       const limb_t* d_norm, uint32_t dn,
+                                       const limb_t* inv, unsigned shift)
+{
+    assert(nn >= dn && dn >= 2 && (d_norm[dn - 1] >> 63) != 0);
+
+    if (shift > 0) {
+        np[nn] = mpn_lshift(np, np, nn, shift);
+    } else {
+        np[nn] = 0;
+    }
+    uint32_t nn1 = nn + 1;
+    uint32_t qn = nn - dn + 1;
+
+    if (qp) mpn_zero(qp, qn);
+
+    uint32_t top = nn1;
+    while (top > dn) {
+        uint32_t wn = (top > 2 * dn) ? 2 * dn : top;
+        uint32_t base = top - wn;
+
+        newton_div_block(qp ? qp + base : nullptr,
+                         np + base, wn, d_norm, dn, inv);
+        top = base + dn;
+    }
+
+    if (shift > 0) {
+        mpn_rshift(np, np, dn, shift);
+    }
+}
+
+// Convenience: quotient and remainder using precomputed reciprocal.
+// np is NOT modified (copied internally).
+inline void mpn_tdiv_qr_preinv(limb_t* qp, limb_t* rp,
+                                 const limb_t* np, uint32_t nn,
+                                 const limb_t* d_norm, uint32_t dn,
+                                 const limb_t* inv, unsigned shift)
+{
+    assert(nn >= dn && dn >= 2);
+
+    ScratchScope scope(scratch());
+    limb_t* tmp = scope.alloc<limb_t>(nn + 1, 32);
+    std::memcpy(tmp, np, nn * sizeof(limb_t));
+    tmp[nn] = 0;
+
+    mpn_div_qr_newton_preinv(qp, tmp, nn, d_norm, dn, inv, shift);
+
+    std::memcpy(rp, tmp, dn * sizeof(limb_t));
 }
 
 // ============================================================
