@@ -11,9 +11,11 @@
 *.a
 *.o
 
-bench/
 evaluations/
 scripts/
-tests/
 WORKFLOW.md
 nul
+
+# Benchmark outputs
+*.csv
+bench/_tmp_*

@@ -195,40 +195,45 @@ public:
             return;
         }
 
+        bool is_sqr = (a == b && na == nb);
         std::size_t nca = n_coeffs_80(na);
-        std::size_t ncb = n_coeffs_80(nb);
+        std::size_t ncb = is_sqr ? nca : n_coeffs_80(nb);
         std::size_t conv_len = nca + ncb - 1;
         std::size_t N = ceil_ntt_size(conv_len);
         if (N < BLK_SZ) N = BLK_SZ;
 
         ::zint::ScratchScope scope(::zint::scratch());
 
-        // Allocate 4x fa + 1x fb as one contiguous 4096-aligned slab.
-        // Preserve original per-buffer 4096B rounding (alloc_doubles behavior) to keep buffers page-aligned and padded.
+        // Allocate 4x fa + (if not squaring) 1x fb as one contiguous 4096-aligned slab.
         std::size_t stride_bytes = N * sizeof(double);
         stride_bytes = (stride_bytes + 4095) / 4096 * 4096;
         std::size_t stride = stride_bytes / sizeof(double);
 
-        // N is a multiple of 4, so each sub-buffer start stays 32B-aligned.
-        double* slab = scope.alloc<double>(5 * stride, 4096);
+        std::size_t n_bufs = is_sqr ? 4 : 5;
+        double* slab = scope.alloc<double>(n_bufs * stride, 4096);
         double* fa[4] = {
             slab + 0 * stride, slab + 1 * stride, slab + 2 * stride, slab + 3 * stride
         };
-        double* fb = slab + 4 * stride;
+        double* fb = is_sqr ? nullptr : slab + 4 * stride;
 
         convert_80bit_all_primes(fa, a, na, ctx_);
         for (int pi = 0; pi < 4; ++pi)
             std::memset(fa[pi] + nca, 0, (stride - nca) * sizeof(double));
-        std::size_t nb_coeffs = n_coeffs_80(nb);
 
         for (int pi = 0; pi < 4; ++pi) {
             auto& Q = ctx_[pi];
 
-            convert_80bit_to_double(fb, b, nb, Q);
-            std::memset(fb + nb_coeffs, 0, (stride - nb_coeffs) * sizeof(double));
+            if (!is_sqr) {
+                convert_80bit_to_double(fb, b, nb, Q);
+                std::memset(fb + ncb, 0, (stride - ncb) * sizeof(double));
+            }
             fft_mixed(Q, fa[pi], N);
-            fft_mixed(Q, fb, N);
-            point_mul(Q, fa[pi], fb, N);
+            if (is_sqr) {
+                point_sqr(Q, fa[pi], N);
+            } else {
+                fft_mixed(Q, fb, N);
+                point_mul(Q, fa[pi], fb, N);
+            }
             ifft_mixed(Q, fa[pi], N);
 
             scale_mixed(Q, fa[pi], conv_len, N);
