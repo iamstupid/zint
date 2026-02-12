@@ -5,7 +5,6 @@ param(
     [Parameter(Position=1)]
     [string]$Exe,
 
-    [switch]$Asm,
     [switch]$Run
 )
 
@@ -48,28 +47,27 @@ $env:LIB = "$msvcLib;$sdkBase\Lib\$sdkVer\ucrt\x64;$sdkBase\Lib\$sdkVer\um\x64"
 $repoRoot = $PSScriptRoot
 $parentRoot = (Resolve-Path (Join-Path $repoRoot "..")).Path
 
-# ── Assemble ASM kernels if requested ───────────────────────────────
+# ── Assemble ASM kernels ────────────────────────────────────────────
+$asmDir = Join-Path $repoRoot "asm"
 $asmObjs = @()
-$asmDefine = @()
 
-if ($Asm) {
-    $asmDir = Join-Path $repoRoot "asm"
-    foreach ($asmFile in @("addmul_1_adx.asm", "submul_1_adx.asm", "mul_basecase_adx.asm")) {
-        $asmPath = Join-Path $asmDir $asmFile
-        $objPath = Join-Path $asmDir ([System.IO.Path]::ChangeExtension($asmFile, ".obj"))
-        if (-not (Test-Path $asmPath)) { continue }
-        Write-Host "  ASM: $asmFile"
-        ml64 /nologo /c /Fo $objPath $asmPath
-        if ($LASTEXITCODE -ne 0) { Write-Error "ml64 failed on $asmFile"; exit 1 }
-        $asmObjs += $objPath
+foreach ($asmFile in @("addmul_1_adx.asm", "submul_1_adx.asm", "mul_basecase_adx.asm")) {
+    $asmPath = Join-Path $asmDir $asmFile
+    $objPath = Join-Path $asmDir ([System.IO.Path]::ChangeExtension($asmFile, ".obj"))
+    if (-not (Test-Path $asmPath)) {
+        Write-Error "Missing ASM source: $asmPath"
+        exit 1
     }
-    $asmDefine = @("/DZINT_USE_ADX_ASM=1")
+    Write-Host "  ASM: $asmFile"
+    ml64 /nologo /c /Fo $objPath $asmPath
+    if ($LASTEXITCODE -ne 0) { Write-Error "ml64 failed on $asmFile"; exit 1 }
+    $asmObjs += $objPath
 }
 
 # ── Compile ─────────────────────────────────────────────────────────
 $clArgs = @(
     "/nologo", "/I$parentRoot", "/std:c++17", "/O2", "/EHsc", "/arch:AVX2"
-) + $asmDefine + @($Src) + $asmObjs + @("/Fe:$Exe")
+) + @($Src) + $asmObjs + @("/Fe:$Exe")
 
 Write-Host "  CL: cl $($clArgs -join ' ')"
 cl @clArgs

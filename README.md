@@ -1,7 +1,7 @@
 # zint
 
-Header-only arbitrary-precision integer library in C++17, with optional x86-64
-ASM kernels (ADX/BMI2) and AVX2-accelerated NTT multiplication.
+Header-only arbitrary-precision integer library in C++17 with x86-64 ASM
+kernels (ADX/BMI2) and AVX2-accelerated NTT multiplication.
 
 ## Features
 
@@ -12,11 +12,11 @@ ASM kernels (ADX/BMI2) and AVX2-accelerated NTT multiplication.
 - **Two-tier NTT**: `p30x3` (3 &times; 30-bit primes, u32 Montgomery, up to ~12M elements) and `p50x4` (4 &times; 50-bit primes, FP Barrett, unlimited)
 - **AVX2 throughout**: bitwise ops, shifts, carry propagation, comparison, NTT butterflies
 - **Thread-local bump allocator** (`scratch.hpp`): zero-overhead temp memory via mark/restore
-- **ASM kernels** (optional, MASM): `addmul_1` (ADX dual-carry, 1.7 cyc/limb on Zen 4), `submul_1`, fused `mul_basecase`
+- **ASM kernels**: `addmul_1` (ADX dual-carry, 1.7 cyc/limb on Zen 4), `submul_1`, fused `mul_basecase`; MASM on Windows, GAS on Linux/macOS
 
 ## Quick start
 
-zint is header-only. Include a single header:
+zint is header-only (plus a small ASM static library). Include a single header:
 
 ```cpp
 #include "zint/zint.hpp"
@@ -35,42 +35,49 @@ int main() {
 
 ### Requirements
 
-- C++17 compiler with AVX2 support
-- x86-64 target (SSE2/AVX2 intrinsics)
-- Optional: MASM (`ml64`) for ASM kernels
+- C++17 compiler with AVX2 support (MSVC, GCC, or Clang)
+- x86-64 target with ADX and BMI2 (Intel Broadwell+ / AMD Zen+)
+- Assembler: MASM (`ml64`) on Windows, GAS (`as`) on Linux/macOS
 
-### MSVC (recommended)
-
-```powershell
-# Without ASM kernels:
-cl /std:c++17 /O2 /EHsc /arch:AVX2 your_program.cpp
-
-# With ASM kernels (requires ml64 on PATH):
-ml64 /nologo /c /Fo zint\asm\addmul_1_adx.obj zint\asm\addmul_1_adx.asm
-ml64 /nologo /c /Fo zint\asm\submul_1_adx.obj zint\asm\submul_1_adx.asm
-ml64 /nologo /c /Fo zint\asm\mul_basecase_adx.obj zint\asm\mul_basecase_adx.asm
-cl /std:c++17 /O2 /EHsc /arch:AVX2 /DZINT_USE_ADX_ASM=1 ^
-    your_program.cpp zint\asm\*.obj
-```
-
-### CMake
+### CMake (all platforms)
 
 ```bash
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
 
-See [CMakeLists.txt](CMakeLists.txt) for options:
-- `ZINT_USE_ADX_ASM` &mdash; enable ADX/BMI2 ASM kernels (default: `ON` on Windows/MSVC with MASM available)
+CMake automatically selects the right assembler and ABI:
+- **Windows/MSVC**: MASM (`.asm` files, Windows x64 ABI)
+- **Linux/macOS**: GAS (`.S` files, System V ABI)
 
-### Convenience script (PowerShell)
+### MSVC (manual)
 
 ```powershell
-# Build and run a single .cpp file:
-.\build.ps1 your_program.cpp your_program.exe
+# Assemble kernels:
+ml64 /nologo /c /Fo zint\asm\addmul_1_adx.obj zint\asm\addmul_1_adx.asm
+ml64 /nologo /c /Fo zint\asm\submul_1_adx.obj zint\asm\submul_1_adx.asm
+ml64 /nologo /c /Fo zint\asm\mul_basecase_adx.obj zint\asm\mul_basecase_adx.asm
 
-# With ASM kernels:
-.\build.ps1 your_program.cpp your_program.exe -Asm
+# Compile and link:
+cl /std:c++17 /O2 /EHsc /arch:AVX2 your_program.cpp zint\asm\*.obj
+```
+
+### GCC / Clang (manual)
+
+```bash
+# Assemble kernels:
+gcc -c -mavx2 -mbmi2 -madx -o addmul_1_adx.o zint/asm/addmul_1_adx.S
+gcc -c -mavx2 -mbmi2 -madx -o submul_1_adx.o zint/asm/submul_1_adx.S
+gcc -c -mavx2 -mbmi2 -madx -o mul_basecase_adx.o zint/asm/mul_basecase_adx.S
+
+# Compile and link:
+g++ -std=c++17 -O2 -mavx2 -mbmi2 -madx your_program.cpp *.o -o your_program
+```
+
+### Convenience script (PowerShell, Windows)
+
+```powershell
+.\build.ps1 your_program.cpp your_program.exe -Run
 ```
 
 ## Project structure
@@ -84,10 +91,9 @@ div.hpp             Division dispatch: schoolbook, Newton reciprocal
 scratch.hpp         Thread-local bump allocator
 tuning.hpp          Crossover thresholds (tuned for Zen 4)
 rng.hpp             xoshiro256++ PRNG for tests/benchmarks
-asm/                Optional MASM kernels (ADX/BMI2)
-  addmul_1_adx.asm    rp[] += ap[] * b, dual-carry ADX, 2-way unrolled
-  submul_1_adx.asm    rp[] -= ap[] * b, BMI2 MULX
-  mul_basecase_adx.asm Fused schoolbook multiply (eliminates per-row overhead)
+asm/                ASM kernels (ADX/BMI2), dual-ABI
+  *.asm               MASM syntax (Windows x64 ABI)
+  *.S                 GAS syntax (System V ABI, Linux/macOS)
 ntt/                NTT engine (internal, used by mul.hpp)
   api.hpp           Top-level NTT multiply dispatch
   p30x3/            3-prime 30-bit engine (u32 Montgomery, mixed-radix)
