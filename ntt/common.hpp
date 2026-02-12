@@ -12,9 +12,13 @@
   #define NTT_HOT
   #define NTT_RESTRICT __restrict
 #elif defined(__GNUC__) || defined(__clang__)
-  #define NTT_FORCEINLINE [[gnu::always_inline]] inline
-  #define NTT_HOT [[gnu::hot]]
+  #define NTT_FORCEINLINE __attribute__((always_inline)) inline
+  #define NTT_HOT __attribute__((hot))
   #define NTT_RESTRICT __restrict__
+  // Compat: some NTT files use bare __forceinline (MSVC keyword)
+  #ifndef __forceinline
+    #define __forceinline __attribute__((always_inline)) inline
+  #endif
 #else
   #define NTT_FORCEINLINE inline
   #define NTT_HOT
@@ -146,7 +150,7 @@ inline u64 n_revbin(u64 x, int bits) {
 }
 
 // ── Aligned allocation ──
-#if defined(_MSC_VER)
+#if defined(_WIN32)
   #include <malloc.h>
   template<class T, idt Align = 32>
   inline T* aligned_alloc_array(idt n) {

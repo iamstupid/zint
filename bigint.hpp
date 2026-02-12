@@ -186,8 +186,16 @@ public:
     }
 
     int compare(long long val) const noexcept {
-        bigint tmp(val);
-        return compare(tmp);
+        if (val == 0) return sign();
+        bool val_neg = (val < 0);
+        uint64_t val_abs = val_neg ? (uint64_t)(-(val + 1)) + 1u : (uint64_t)val;
+        int sa = sign(), sb = val_neg ? -1 : 1;
+        if (sa != sb) return sa > sb ? 1 : -1;
+        // Same sign — compare magnitudes
+        uint32_t n = abs_size();
+        int mag_cmp = (n > 1) ? 1 : (n == 0) ? -1
+            : (data_[0] > val_abs) ? 1 : (data_[0] < val_abs) ? -1 : 0;
+        return sa < 0 ? -mag_cmp : mag_cmp;
     }
 
     bool operator==(const bigint& o) const noexcept { return compare(o) == 0; }
@@ -271,30 +279,28 @@ public:
 
         bool neg_a = is_negative();
         bool neg_b = o.is_negative();
+        uint32_t an = abs_size(), bn = o.abs_size();
 
         if (neg_a == neg_b) {
-            // Same sign: add magnitudes, keep sign
-            bigint tmp;
-            add_magnitudes(tmp, *this, o);
-            tmp.set_size_sign(tmp.abs_size(), neg_a);
-            *this = std::move(tmp);
+            // Same sign: add magnitudes in-place, keep sign
+            inplace_add_mag(o.data_, bn, an);
+            set_size_sign(abs_size(), neg_a);
         } else {
             // Different sign: subtract smaller from larger
             int cmp = compare_abs(o);
             if (cmp == 0) {
-                size_ = 0; // result is zero
+                size_ = 0;
             } else if (cmp > 0) {
-                // |this| > |o|: result sign = sign(this)
-                bigint tmp;
-                sub_magnitudes(tmp, *this, o);
-                tmp.set_size_sign(tmp.abs_size(), neg_a);
-                *this = std::move(tmp);
+                // |this| > |o|: rp=ap alias safe for mpn_sub
+                (void)mpn_sub(data_, data_, an, o.data_, bn);
+                set_size_sign(an, neg_a);
+                trim();
             } else {
-                // |this| < |o|: result sign = sign(o)
-                bigint tmp;
-                sub_magnitudes(tmp, o, *this);
-                tmp.set_size_sign(tmp.abs_size(), neg_b);
-                *this = std::move(tmp);
+                // |this| < |o|: rp=bp alias safe (read before write)
+                ensure_capacity(bn);
+                (void)mpn_sub(data_, o.data_, bn, data_, an);
+                set_size_sign(bn, neg_b);
+                trim();
             }
         }
         return *this;
@@ -306,38 +312,68 @@ public:
 
         bool neg_a = is_negative();
         bool neg_b = o.is_negative();
+        uint32_t an = abs_size(), bn = o.abs_size();
 
         if (neg_a != neg_b) {
-            // Different sign: add magnitudes
-            bigint tmp;
-            add_magnitudes(tmp, *this, o);
-            tmp.set_size_sign(tmp.abs_size(), neg_a);
-            *this = std::move(tmp);
+            // Different sign: add magnitudes in-place, keep sign of this
+            inplace_add_mag(o.data_, bn, an);
+            set_size_sign(abs_size(), neg_a);
         } else {
             // Same sign: subtract magnitudes
             int cmp = compare_abs(o);
             if (cmp == 0) {
                 size_ = 0;
             } else if (cmp > 0) {
-                bigint tmp;
-                sub_magnitudes(tmp, *this, o);
-                tmp.set_size_sign(tmp.abs_size(), neg_a);
-                *this = std::move(tmp);
+                (void)mpn_sub(data_, data_, an, o.data_, bn);
+                set_size_sign(an, neg_a);
+                trim();
             } else {
-                bigint tmp;
-                sub_magnitudes(tmp, o, *this);
-                tmp.set_size_sign(tmp.abs_size(), !neg_a); // flip sign
-                *this = std::move(tmp);
+                ensure_capacity(bn);
+                (void)mpn_sub(data_, o.data_, bn, data_, an);
+                set_size_sign(bn, !neg_a);
+                trim();
             }
         }
         return *this;
     }
 
+private:
+    // In-place add magnitude: data_[0..an) += bp[0..bn), updating size.
+    // Handles both an >= bn and bn > an cases.
+    void inplace_add_mag(const limb_t* bp, uint32_t bn, uint32_t an) {
+        if (an >= bn) {
+            ensure_capacity(an + 1);
+            limb_t carry = mpn_add(data_, data_, an, bp, bn);
+            if (carry) { data_[an] = carry; an++; }
+            set_size_sign(an, false);
+        } else {
+            ensure_capacity(bn + 1);
+            // Zero-extend our data from an to bn limbs, then add
+            mpn_zero(data_ + an, bn - an);
+            limb_t carry = mpn_add_n(data_, data_, bp, bn);
+            if (carry) { data_[bn] = carry; bn++; }
+            set_size_sign(bn, false);
+        }
+    }
+public:
+
     bigint operator+(const bigint& o) const { bigint r(*this); r += o; return r; }
     bigint operator-(const bigint& o) const { bigint r(*this); r -= o; return r; }
 
-    bigint& operator+=(long long val) { bigint tmp(val); *this += tmp; return *this; }
-    bigint& operator-=(long long val) { bigint tmp(val); *this -= tmp; return *this; }
+    bigint& operator+=(long long val) {
+        if (val == 0) return *this;
+        bool neg = (val < 0);
+        uint64_t abs_v = neg ? (uint64_t)(-(val + 1)) + 1u : (uint64_t)val;
+        add_signed_limb(abs_v, neg);
+        return *this;
+    }
+    bigint& operator-=(long long val) {
+        if (val == 0) return *this;
+        bool neg = (val < 0);
+        uint64_t abs_v = neg ? (uint64_t)(-(val + 1)) + 1u : (uint64_t)val;
+        add_signed_limb(abs_v, !neg); // subtraction = add with flipped sign
+        return *this;
+    }
     bigint operator+(long long val) const { bigint r(*this); r += val; return r; }
     bigint operator-(long long val) const { bigint r(*this); r -= val; return r; }
 
@@ -408,10 +444,24 @@ public:
     // ---- Bitwise operations (infinite two's complement semantics) ----
 
     bigint operator~() const {
-        // For infinite two's complement: ~x == -x - 1
-        bigint r(*this);
-        r.negate();
-        r -= 1;
+        // ~x == -x - 1. Single-pass case analysis on sign-magnitude:
+        if (is_zero()) return bigint(-1LL);
+        bigint r;
+        uint32_t n = abs_size();
+        if (!is_negative()) {
+            // x > 0: ~x = -(x+1)
+            r.ensure_capacity(n + 1);
+            limb_t carry = mpn_add_1(r.data_, data_, n, 1);
+            if (carry) { r.data_[n] = carry; n++; }
+            r.set_size_sign(n, true);
+        } else {
+            // x < 0: ~x = |x| - 1
+            r.ensure_capacity(n);
+            mpn_sub_1(r.data_, data_, n, 1);
+            n = mpn_normalize(r.data_, n);
+            if (n == 0) r.size_ = 0;
+            else r.set_size_sign(n, false);
+        }
         return r;
     }
 
@@ -476,12 +526,51 @@ public:
         }
         uint32_t n = abs_size();
         ensure_capacity(n + 1);
-        limb_t carry = mpn_add_1v(data_, data_, n, b);
+        limb_t carry = mpn_add_1(data_, data_, n, b);
         if (carry) {
             data_[n] = carry;
             n++;
         }
         set_size_sign(n, is_negative());
+    }
+
+    // ---- Add/subtract a single signed limb (used by operator+=/operator-= for long long) ----
+
+    void add_signed_limb(uint64_t val_abs, bool val_neg) {
+        if (val_abs == 0) return;
+        if (is_zero()) {
+            ensure_capacity(1);
+            data_[0] = val_abs;
+            set_size_sign(1, val_neg);
+            return;
+        }
+        bool this_neg = is_negative();
+        if (this_neg == val_neg) {
+            // Same sign: add to magnitude
+            uint32_t n = abs_size();
+            ensure_capacity(n + 1);
+            limb_t carry = mpn_add_1(data_, data_, n, val_abs);
+            if (carry) { data_[n] = carry; n++; }
+            set_size_sign(n, this_neg);
+        } else {
+            // Different sign: subtract from magnitude
+            uint32_t n = abs_size();
+            if (n > 1) {
+                // |this| > val_abs guaranteed (multi-limb > single limb)
+                mpn_sub_1(data_, data_, n, val_abs);
+                trim();
+            } else {
+                limb_t d = data_[0];
+                if (d > val_abs) {
+                    data_[0] = d - val_abs;
+                } else if (d < val_abs) {
+                    data_[0] = val_abs - d;
+                    set_size_sign(1, val_neg);
+                } else {
+                    size_ = 0; // cancel to zero
+                }
+            }
+        }
     }
 
     // ---- Radix conversion utilities ----
@@ -824,7 +913,7 @@ private:
 
         limb_t* tmp = scope.alloc<limb_t>(n, 32);
         mpn_not_n(tmp, rtc, n);
-        (void)mpn_add_1v(tmp, tmp, n, 1);
+        (void)mpn_add_1(tmp, tmp, n, 1);
         uint32_t m = mpn_normalize(tmp, n);
         if (m == 0) {
             size_ = 0;
@@ -845,7 +934,7 @@ private:
 
         // Two's complement: ~mag + 1 (within n limbs).
         mpn_not_n(rp, rp, n);
-        (void)mpn_add_1v(rp, rp, n, 1);
+        (void)mpn_add_1(rp, rp, n, 1);
     }
 
     static bigint from_twos_complement(const limb_t* ap, uint32_t n) {
@@ -859,7 +948,7 @@ private:
         ScratchScope scope(scratch());
         limb_t* tmp = scope.alloc<limb_t>(n, 32);
         mpn_not_n(tmp, ap, n);
-        (void)mpn_add_1v(tmp, tmp, n, 1);
+        (void)mpn_add_1(tmp, tmp, n, 1);
         uint32_t m = mpn_normalize(tmp, n);
         return from_limbs(tmp, m, true);
     }
@@ -1224,7 +1313,24 @@ public:
         return *this;
     }
 
-    bigint operator*(const bigint& o) const { bigint r(*this); r *= o; return r; }
+    bigint operator*(const bigint& o) const {
+        if (is_zero() || o.is_zero()) return bigint();
+        bool neg = is_negative() != o.is_negative();
+        uint32_t an = abs_size(), bn = o.abs_size();
+        uint32_t rn = an + bn;
+        bigint r;
+        r.ensure_capacity(rn);
+        if (this == &o) {
+            mpn_sqr(r.data_, data_, an);
+        } else if (an >= bn) {
+            mpn_mul(r.data_, data_, an, o.data_, bn);
+        } else {
+            mpn_mul(r.data_, o.data_, bn, data_, an);
+        }
+        rn = mpn_normalize(r.data_, rn);
+        r.set_size_sign(rn, neg);
+        return r;
+    }
 
     // ---- Division and modulo ----
 
@@ -1282,9 +1388,28 @@ public:
     bigint operator/(const bigint& o) const { bigint r(*this); r /= o; return r; }
     bigint operator%(const bigint& o) const { bigint q, r; divmod(*this, o, q, r); return r; }
 
-    // Single-limb division
-    bigint& operator/=(long long val) { bigint tmp(val); *this /= tmp; return *this; }
-    bigint& operator%=(long long val) { bigint tmp(val); *this %= tmp; return *this; }
+    // Single-limb division — uses mpn_divrem_1 directly (no heap allocation)
+    bigint& operator/=(long long val) {
+        assert(val != 0);
+        if (is_zero()) return *this;
+        bool val_neg = (val < 0);
+        uint64_t val_abs = val_neg ? (uint64_t)(-(val + 1)) + 1u : (uint64_t)val;
+        bool result_neg = is_negative() != val_neg;
+        (void)mpn_divrem_1(data_, data_, abs_size(), val_abs);
+        trim();
+        if (!is_zero()) set_size_sign(abs_size(), result_neg);
+        return *this;
+    }
+    bigint& operator%=(long long val) {
+        assert(val != 0);
+        if (is_zero()) return *this;
+        bool this_neg = is_negative();
+        uint64_t val_abs = (val < 0) ? (uint64_t)(-(val + 1)) + 1u : (uint64_t)val;
+        limb_t rem = mpn_divrem_1(data_, data_, abs_size(), val_abs);
+        if (rem == 0) size_ = 0;
+        else { data_[0] = rem; set_size_sign(1, this_neg); }
+        return *this;
+    }
     bigint operator/(long long val) const { bigint r(*this); r /= val; return r; }
     bigint operator%(long long val) const { bigint r(*this); r %= val; return r; }
 };

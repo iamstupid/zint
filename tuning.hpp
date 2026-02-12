@@ -36,6 +36,10 @@ static constexpr uint32_t DIV_DC_THRESHOLD = 60;
 // Newton reciprocal: base case schoolbook at this many limbs
 static constexpr uint32_t INVERT_THRESHOLD = 32;
 
+// nn/dn ratio above which Newton beats schoolbook even for small dn.
+// Schoolbook is O(nn*dn); Newton block-processes at O(nn/dn * M(dn)).
+static constexpr uint32_t DIV_NEWTON_RATIO = 8;
+
 // ============================================================
 // Radix conversion thresholds
 // ============================================================

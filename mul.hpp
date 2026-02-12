@@ -197,7 +197,7 @@ inline void mpn_mul_karatsuba_n(limb_t* rp, const limb_t* ap, const limb_t* bp,
     limb_t carry = mpn_add(rp + m, rp + m, 2 * n - m, scratch, 2 * h);
     carry += z1_hi;
     if (carry && m + 2 * h < 2 * n) {
-        mpn_add_1v(rp + m + 2 * h, rp + m + 2 * h, 2 * n - m - 2 * h, (limb_t)carry);
+        mpn_add_1(rp + m + 2 * h, rp + m + 2 * h, 2 * n - m - 2 * h, (limb_t)carry);
     }
 }
 
@@ -255,6 +255,83 @@ inline void mpn_mul_karatsuba(limb_t* rp, const limb_t* ap, uint32_t an,
 }
 
 // ============================================================
+// Karatsuba squaring (exploits a==b symmetry)
+// ============================================================
+
+// rp[0..2*n) = ap[0..n)^2
+// Saves ~33% per level: one |a0-a1| instead of two, recursive sqr instead of mul.
+// Recombination: z1 = z0 + z2 - |a0-a1|^2 (sign is always subtract).
+inline void mpn_sqr_karatsuba_n(limb_t* rp, const limb_t* ap,
+                                 uint32_t n, limb_t* scratch)
+{
+    if (n < SQR_KARATSUBA_THRESHOLD) {
+        mpn_sqr_basecase(rp, ap, n);
+        return;
+    }
+
+    uint32_t m = n / 2;
+    uint32_t h = n - m;
+
+    const limb_t* a0 = ap;
+    const limb_t* a1 = ap + m;
+
+    // Step 1: z0 = a0^2 (in rp[0..2m))
+    mpn_sqr_karatsuba_n(rp, a0, m, scratch);
+
+    // Step 2: z2 = a1^2 (in rp[2m..2n))
+    mpn_sqr_karatsuba_n(rp + 2 * m, a1, h, scratch);
+
+    // Step 3: Compute |a0 - a1| into t0 (h limbs)
+    limb_t* t0 = scratch;
+    limb_t* t2 = scratch + 2 * h;  // keep same offset as mul version
+
+    bool neg_a;
+    if (h > m) {
+        neg_a = (a1[m] != 0) || (mpn_cmp(a0, a1, m) < 0);
+    } else {
+        neg_a = (mpn_cmp(a0, a1, m) < 0);
+    }
+
+    if (!neg_a) {
+        if (h == m) {
+            mpn_sub_n(t0, a0, a1, m);
+        } else {
+            limb_t borrow = mpn_sub_n(t0, a0, a1, m);
+            t0[m] = 0 - a1[m] - borrow;
+        }
+    } else {
+        if (h == m) {
+            mpn_sub_n(t0, a1, a0, m);
+        } else {
+            mpn_copyi(t0, a1, h);
+            mpn_sub(t0, t0, h, a0, m);
+        }
+    }
+
+    // Step 4: t2 = |a0-a1|^2 (in t2[0..2h))
+    if ((t0[h - 1] | t0[0]) == 0 && mpn_normalize(t0, h) == 0) {
+        mpn_zero(t2, 2 * h);
+    } else {
+        mpn_sqr_karatsuba_n(t2, t0, h, t2 + 2 * h);
+    }
+
+    // Step 5: Recombination — z1 = z0 + z2 - diff^2 (always subtract)
+    std::memcpy(scratch, rp, 2 * m * sizeof(limb_t));
+    if (h > m) { scratch[2 * m] = 0; scratch[2 * m + 1] = 0; }
+    limb_t z1_hi = mpn_add_n(scratch, scratch, rp + 2 * m, 2 * h);
+
+    limb_t borrow = mpn_sub_n(scratch, scratch, t2, 2 * h);
+    z1_hi -= borrow;
+
+    // Add z1 to rp[m..2n)
+    limb_t carry = mpn_add(rp + m, rp + m, 2 * n - m, scratch, 2 * h);
+    carry += z1_hi;
+    if (carry && m + 2 * h < 2 * n) {
+        mpn_add_1(rp + m + 2 * h, rp + m + 2 * h, 2 * n - m - 2 * h, (limb_t)carry);
+    }
+}
+
+// ============================================================
 // NTT multiplication (bridge to ntt/p50x4)
 // ============================================================
 
@@ -294,11 +371,10 @@ inline void mpn_sqr(limb_t* rp, const limb_t* ap, uint32_t n) {
     if (n < SQR_KARATSUBA_THRESHOLD) {
         mpn_sqr_basecase(rp, ap, n);
     } else if (n < SQR_NTT_THRESHOLD) {
-        // Use Karatsuba for squaring (same algorithm, a == b)
         uint32_t scratch_n = 6 * n + 128;
         ScratchScope scope(scratch());
         limb_t* scratchp = scope.alloc<limb_t>(scratch_n, 32);
-        mpn_mul_karatsuba_n(rp, ap, ap, n, scratchp);
+        mpn_sqr_karatsuba_n(rp, ap, n, scratchp);
     } else {
         mpn_mul_ntt(rp, ap, n, ap, n);
     }

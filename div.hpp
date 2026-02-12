@@ -434,10 +434,10 @@ inline void mpn_div_qr(limb_t* qp, limb_t* np, uint32_t nn,
         return;
     }
 
-    if (dn < DIV_DC_THRESHOLD) {
-        mpn_div_qr_schoolbook(qp, np, nn, dp, dn);
-    } else {
+    if (dn >= DIV_DC_THRESHOLD || nn >= DIV_NEWTON_RATIO * dn) {
         mpn_div_qr_newton(qp, np, nn, dp, dn);
+    } else {
+        mpn_div_qr_schoolbook(qp, np, nn, dp, dn);
     }
 }
 

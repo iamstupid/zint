@@ -190,31 +190,6 @@ inline limb_t mpn_add_1(limb_t* rp, const limb_t* ap, uint32_t n, limb_t b) {
     return (limb_t)carry;
 }
 
-// Version that always writes all n output limbs.
-// Same SIMD carry-propagation scan as mpn_add_1.
-inline limb_t mpn_add_1v(limb_t* rp, const limb_t* ap, uint32_t n, limb_t b) {
-    assert(n > 0);
-    unsigned char carry = _addcarry_u64(0, ap[0], b, (unsigned long long*)&rp[0]);
-    uint32_t i = 1;
-    if (carry) {
-        const __m256i v_max = _mm256_set1_epi64x(-1LL);
-        for (; i + 4 <= n; i += 4) {
-            __m256i v = _mm256_loadu_si256((const __m256i*)(ap + i));
-            if (_mm256_movemask_epi8(_mm256_cmpeq_epi64(v, v_max)) != -1) break;
-            _mm256_storeu_si256((__m256i*)(rp + i), _mm256_setzero_si256());
-        }
-        for (; i < n; ++i) {
-            carry = _addcarry_u64(carry, ap[i], 0, (unsigned long long*)&rp[i]);
-            if (!carry) { ++i; break; }
-        }
-    }
-    // Copy remaining
-    if (rp != ap) {
-        for (; i < n; ++i) rp[i] = ap[i];
-    }
-    return carry;
-}
-
 // rp[0..an) = ap[0..an) + bp[0..bn), return carry
 // Precondition: an >= bn > 0
 inline limb_t mpn_add(limb_t* rp, const limb_t* ap, uint32_t an, const limb_t* bp, uint32_t bn) {
@@ -222,7 +197,7 @@ inline limb_t mpn_add(limb_t* rp, const limb_t* ap, uint32_t an, const limb_t* b
     limb_t carry = mpn_add_n(rp, ap, bp, bn);
     if (an > bn) {
         if (carry) {
-            carry = mpn_add_1v(rp + bn, ap + bn, an - bn, carry);
+            carry = mpn_add_1(rp + bn, ap + bn, an - bn, carry);
         } else if (rp != ap) {
             mpn_copyi(rp + bn, ap + bn, an - bn);
         }
@@ -399,9 +374,14 @@ inline int mpn_cmp(const limb_t* ap, const limb_t* bp, uint32_t n) {
         if (mask != -1) {
             // At least one lane differs. Find highest differing lane.
             // Lanes: [i-4]=bits0-7, [i-3]=bits8-15, [i-2]=bits16-23, [i-1]=bits24-31
+            uint32_t pos;
+#ifdef _MSC_VER
             unsigned long idx;
             _BitScanReverse(&idx, (unsigned long)(~mask));
-            uint32_t pos = i - 4 + (idx >> 3);
+            pos = i - 4 + (idx >> 3);
+#else
+            pos = i - 4 + (31 - __builtin_clz((unsigned)(~mask & 0xFFFFFFFF))) / 8;
+#endif
             return ap[pos] > bp[pos] ? 1 : -1;
         }
     }
@@ -459,7 +439,7 @@ inline limb_t mpn_mul_1(limb_t* rp, const limb_t* ap, uint32_t n, limb_t b) {
 extern "C" std::uint64_t zint_mpn_addmul_1_adx(std::uint64_t* rp, const std::uint64_t* ap, std::uint32_t n, std::uint64_t b);
 
 // rp[0..n) += ap[0..n) * b, return carry limb
-// Scalar for tiny n (avoids call overhead), ADX asm for n>=3 (3x faster).
+// ADX/BMI2 asm. 2-way unrolled, ~1.7 cyc/limb on Zen 4.
 inline limb_t mpn_addmul_1(limb_t* rp, const limb_t* ap, uint32_t n, limb_t b) {
     return (limb_t)zint_mpn_addmul_1_adx((std::uint64_t*)rp, (const std::uint64_t*)ap, n, (std::uint64_t)b);
 }
@@ -467,7 +447,7 @@ inline limb_t mpn_addmul_1(limb_t* rp, const limb_t* ap, uint32_t n, limb_t b) {
 extern "C" std::uint64_t zint_mpn_submul_1_adx(std::uint64_t* rp, const std::uint64_t* ap, std::uint32_t n, std::uint64_t b);
 
 // rp[0..n) -= ap[0..n) * b, return borrow limb
-// Scalar for tiny n, BMI2 asm for n>=3 (1.8x faster).
+// BMI2 asm (no ADX). 2-way unrolled, ~2.2 cyc/limb on Zen 4.
 inline limb_t mpn_submul_1(limb_t* rp, const limb_t* ap, uint32_t n, limb_t b) {
     return (limb_t)zint_mpn_submul_1_adx((std::uint64_t*)rp, (const std::uint64_t*)ap, n, (std::uint64_t)b);
 }
@@ -585,13 +565,19 @@ inline limb_t* mpn_alloc(uint32_t n) {
 #ifdef _MSC_VER
     return static_cast<limb_t*>(_aligned_malloc(bytes, ALLOC_ALIGN));
 #else
-    return static_cast<limb_t*>(std::aligned_alloc(ALLOC_ALIGN, bytes));
+#ifdef _WIN32
+    return static_cast<limb_t*>(_aligned_malloc(bytes, ALLOC_ALIGN));
+#else
+    void* ptr = nullptr;
+    posix_memalign(&ptr, ALLOC_ALIGN, bytes);
+    return static_cast<limb_t*>(ptr);
+#endif
 #endif
 }
 
 inline void mpn_free(limb_t* p) {
     if (!p) return;
-#ifdef _MSC_VER
+#ifdef _WIN32
     _aligned_free(p);
 #else
     std::free(p);

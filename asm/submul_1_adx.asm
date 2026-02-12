@@ -18,7 +18,6 @@ option casemap:none
 PUBLIC zint_mpn_submul_1_adx
 zint_mpn_submul_1_adx PROC
     ; rcx = rp, rdx = ap, r8d = n, r9 = b
-    push rbx
     push rsi
     push rdi
 
@@ -84,7 +83,6 @@ Lloop:
 Ldone:
     pop  rdi
     pop  rsi
-    pop  rbx
     ret
 zint_mpn_submul_1_adx ENDP
 

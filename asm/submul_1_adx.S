@@ -16,8 +16,6 @@
 .type  zint_mpn_submul_1_adx, @function
 
 zint_mpn_submul_1_adx:
-    push rbx
-
     # Shuffle: need rdx=b for MULX, ecx=n.
     mov  r8d, edx
     mov  rdx, rcx
@@ -77,7 +75,6 @@ zint_mpn_submul_1_adx:
     jnz  .Lloop
 
 .Ldone:
-    pop  rbx
     ret
 
 .size zint_mpn_submul_1_adx, .-zint_mpn_submul_1_adx
